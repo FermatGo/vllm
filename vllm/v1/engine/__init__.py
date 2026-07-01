@@ -19,6 +19,7 @@ from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
 
+
 # Type for pause_generation mode parameter.
 # - "abort": Abort all in-flight requests immediately (default).
 # - "wait": Wait for in-flight requests to complete before pausing.
@@ -77,6 +78,27 @@ class EngineCoreReadyResponse:
     dp_stats_address: str | None
 
 
+@dataclass
+class ContextManagementEditsParams: # 上下文编辑
+    type: Literal["offload","prefetch","evict"] = "offload"
+    start: int = 0
+    end: int = 0
+    target: Literal["messages", "tools"] = "messages"
+
+
+@dataclass
+class ContextManagementParams:
+    manage_request: bool | None = False  # 仅kvc管理请求，出现该字段表示请求本身内容并不会被执行
+    edits: list[ContextManagementEditsParams] = None
+
+
+@dataclass
+class CacheControlParams:
+    type: Literal["ephemeral"] = "ephemeral"  # 仅支持 ephemeral
+    ttl: float = 300.0  # 缓存保留时间（秒），默认5min，最大1h
+    msg_offset: int = 0
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -116,6 +138,15 @@ class EngineCoreRequest(
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, Any] | None = None
 
+    # agent_hint
+    session_id: str | None = None
+    parent_session_id: str | None = None
+    ttl: float | None = None  # 保留时间（秒）
+    cache_control: CacheControlParams | None = None
+    context_management: ContextManagementParams | None = None
+    session_management_flag: int = 0  # 0：忽略，1：free_session
+
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
@@ -151,6 +182,23 @@ class EngineCoreEvent(msgspec.Struct):
         timestamp = time.monotonic() if timestamp is None else timestamp
         return cls(event_type, timestamp)
 
+# Response:
+# {
+#     "session_id": "sub-1",
+#     "freed_blocks": 12,
+#     "orphaned_blocks": 8,
+#     "children_freed": [
+#         {"session_id": "sub-1-child", "freed_blocks": 5, "orphaned_blocks": 3}
+#     ]
+# }
+@dataclass
+class AgentHintSessionManagementResponse:
+    session_id: str | None
+    freed_blocks: int = -1
+    orphaned_blocks: int = -1
+    children_freed: list["AgentHintSessionManagementResponse"] | None = None
+
+
 
 class EngineCoreOutput(
     msgspec.Struct,
@@ -179,6 +227,8 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    agent_hint_response: AgentHintSessionManagementResponse | None = None
 
     @property
     def finished(self) -> bool:

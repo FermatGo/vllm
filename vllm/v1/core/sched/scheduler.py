@@ -402,6 +402,13 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
+            # ===== schedule, request = <vllm.v1.request.Request object at 0xfffb44635ed0>, request.session_id = None,
+            # request.parent_session_id = None, request.ttl = None, request.cache_control = None, request.context_management = None,
+            # request.session_management_flag = 1
+            logger.warning(f'===== schedule, request = {request}, request.session_id = {request.session_id}, request.parent_session_id = {request.parent_session_id}, '
+                           f'request.ttl = {request.ttl}, request.cache_control = {request.cache_control}, request.context_management = {request.context_management}, '
+                           f'request.session_management_flag = {request.session_management_flag}')
+
             if (
                 request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).

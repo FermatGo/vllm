@@ -30,6 +30,8 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 
+from vllm.v1.engine import CacheControlParams, ContextManagementParams, ContextManagementEditsParams
+
 logger = init_logger(__name__)
 
 
@@ -357,6 +359,20 @@ class InputProcessor:
                     )
                 )
 
+
+        cache_control = CacheControlParams(
+                type=prompt["cache_control"].type,
+                ttl=prompt["cache_control"].ttl,
+                msg_offset=prompt["cache_control"].msg_offset,
+            ) if prompt.get("cache_control") else None
+
+        context_management = ContextManagementParams(
+                manage_request=prompt["context_management"].manage_request,
+                edits=None if prompt["context_management"].edits is None else
+                [ContextManagementEditsParams(type=e.type, start=e.start,
+                                              end=e.end, target=e.target) for e in prompt["context_management"].edits]) if prompt.get("context_management") else None
+
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -371,6 +387,12 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            session_id=prompt["session_id"],
+            parent_session_id=prompt["parent_session_id"],
+            ttl=prompt["ttl"],
+            cache_control=cache_control,
+            context_management=context_management,
+            session_management_flag=prompt["session_management_flag"]
         )
 
     def _validate_prompt_len(

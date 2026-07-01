@@ -147,6 +147,36 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
+class ContextManagementEditsParams(OpenAIBaseModel): # 上下文编辑
+    type: Literal["offload","prefetch","evict"] = "offload"
+    start: int = Field(default=0)
+    end: int = Field(default=0)
+    target: Literal["messages", "tools"] = "messages"
+
+
+class ContextManagementParams(OpenAIBaseModel):
+    manage_request: bool | None = Field(default=False)  # 仅kvc管理请求，出现该字段表示请求本身内容并不会被执行
+    edits: list[ContextManagementEditsParams] = Field(default=None)
+
+
+class CacheControlParams(OpenAIBaseModel):
+    type: Literal["ephemeral"] = "ephemeral"  # 仅支持 ephemeral
+    ttl: float = Field(default=300.0, ge=0, le=3600)  # 缓存保留时间（秒），默认5min，最大1h
+    msg_offset: int = Field(default=0)
+
+
+class AgentHintParams(OpenAIBaseModel):
+    """Agent 行为提示参数，通过 extra_body.agent_hint 传入"""
+    is_free_session: int | None = 0
+    session_id: str | None = Field(default=None)
+    parent_session_id: str | None = Field(default=None)
+    cache_control: CacheControlParams | None = Field(default=None)  # 包含 ttl 字段
+    # 以下字段仅设计预留，穿刺版本不实现
+    context_management: ContextManagementParams | None = Field(default=None)
+    latency_control: dict | None = Field(default=None)
+    priority_control: dict | None = Field(default=None)
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -186,6 +216,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # NOTE this will be ignored by vLLM
     user: str | None = None
+
+    # 通过 OpenAI SDK 的 extra_body 机制传入，所有字段收纳在 agent_hint 下
+    agent_hint: AgentHintParams | None = Field(default=None)
+    session_management_flag: int = 0
 
     # --8<-- [start:chat-completion-sampling-params]
     use_beam_search: bool = False
@@ -824,6 +858,26 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                 )
 
         return data
+
+    @model_validator(mode="after")
+    def _validate_agent_hint(self) -> "ChatCompletionRequest":
+        if self.agent_hint is None:
+            return self
+        # session_id 和 parent_session_id 不能相同
+        if (self.agent_hint.session_id is not None
+                and self.agent_hint.parent_session_id is not None
+                and self.agent_hint.session_id == self.agent_hint.parent_session_id):
+            raise ValueError(
+                "agent_hint.session_id and agent_hint.parent_session_id must be different"
+            )
+        # cache_control.ttl > 0 时，session_id 建议提供
+        if (self.agent_hint.cache_control is not None
+                and self.agent_hint.cache_control.ttl > 0
+                and self.agent_hint.session_id is None):
+            # TTL无session_id时仅对当前请求生效（等价于全局临时保留）
+            # 不报错，但ttl效果可能不如预期
+            pass
+        return self
 
 
 class BatchChatCompletionRequest(OpenAIBaseModel):

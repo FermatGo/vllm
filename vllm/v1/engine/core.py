@@ -63,6 +63,7 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
     UtilityResult,
+    AgentHintSessionManagementResponse
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
@@ -1171,6 +1172,33 @@ class EngineCoreProc(EngineCore):
 
         raise SystemExit
 
+
+    def _is_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any):
+        if request_type == EngineCoreRequestType.ADD:
+            req, request_wave = request
+
+            is_session_management = req and req.context_management and req.context_management.manage_request
+            logger.warning(f'===== _is_agent_hint_session_management, type(req) = {type(req)}, is_session_management = {is_session_management}')
+            return is_session_management
+
+
+    def _process_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any):
+        if request_type == EngineCoreRequestType.ADD:
+            req, request_wave = request
+
+            list = [
+                EngineCoreOutput(req.request_id, [1], finish_reason=FinishReason.LENGTH,
+                                 agent_hint_response=AgentHintSessionManagementResponse(
+                                     session_id="sid_112345",
+                                     freed_blocks=11,
+                                     orphaned_blocks=12,
+                                     children_freed=[]
+                                 ))
+            ]
+            outputs = EngineCoreOutputs(engine_index=req.client_index, outputs=list)
+            self.output_queue.put_nowait((req.client_index, outputs))
+
+
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
@@ -1188,7 +1216,10 @@ class EngineCoreProc(EngineCore):
             block = self.process_input_queue_block
             try:
                 req = self.input_queue.get(block=block)
-                self._handle_client_request(*req)
+                if self._is_agent_hint_session_management(*req): #
+                    self._process_agent_hint_session_management(*req)
+                else:
+                    self._handle_client_request(*req)
             except queue.Empty:
                 break
             if not block:
@@ -1200,7 +1231,10 @@ class EngineCoreProc(EngineCore):
         # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
-            self._handle_client_request(*req)
+            if self._is_agent_hint_session_management(*req):  #
+                self._process_agent_hint_session_management(*req)
+            else:
+                self._handle_client_request(*req)
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""

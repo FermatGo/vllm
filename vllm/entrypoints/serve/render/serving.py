@@ -179,6 +179,11 @@ class OpenAIServingRender:
             stream_options=(request.stream_options if request.stream else None),
             cache_salt=request.cache_salt,
             priority=request.priority,
+            session_id=engine_input.session_id,
+            parent_session_id=engine_input.parent_session_id,
+            ttl=request.ttl,
+            cache_control=request.cache_control,
+            context_management=request.context_management,
         )
 
     async def render_chat(
@@ -600,5 +605,12 @@ class OpenAIServingRender:
                 request = tool_parser(tokenizer, request.tools).adjust_request(
                     request=request
                 )
+
+        engine_input['session_id'] = request.agent_hint.session_id if request.agent_hint else None
+        engine_input['parent_session_id'] = request.agent_hint.parent_session_id if request.agent_hint else None
+        engine_input['ttl'] = request.agent_hint.cache_control.ttl if request.agent_hint and request.agent_hint.cache_control else None
+        engine_input['cache_control'] = request.agent_hint.cache_control if request.agent_hint else None
+        engine_input['context_management'] = request.agent_hint.context_management if request.agent_hint else None
+        engine_input['session_management_flag'] = request.session_management_flag
 
         return conversation, [engine_input]

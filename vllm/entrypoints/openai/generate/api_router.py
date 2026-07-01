@@ -41,6 +41,12 @@ def register_generate_api_routers(app: FastAPI):
 
     register_anthropic_api_router(app)
 
+    from vllm.entrypoints.openai.sessions.api_router import (
+        attach_router as sessions_api_router,
+    )
+
+    sessions_api_router(app)
+
 
 async def init_generate_state(
     engine_client: "EngineClient",
