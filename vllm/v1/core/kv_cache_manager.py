@@ -208,7 +208,7 @@ class KVCacheManager:
         max_cache_hit_length = request.num_tokens - 1
         computed_blocks, num_new_computed_tokens = (
             self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length
+                request.block_hashes, max_cache_hit_length, request.session_id
             )
         )
 
@@ -352,6 +352,18 @@ class KVCacheManager:
                 "external computed tokens"
             )
 
+        self.coordinator.register_session(
+            session_id=request.session_id,
+            parent_session_id=request.parent_session_id,
+        )
+
+        # When this request first participates in the KV allocation, 
+        # record the ttl.
+        self.coordinator.record_request_ttl(
+            request_id=request.request_id,
+            ttl=request.ttl,
+        )
+
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
         else:
@@ -407,6 +419,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                session_id=request.session_id,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
@@ -414,6 +427,7 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+            session_id=request.session_id,
         )
 
         # P/D: delay caching blocks if we have to recv from
@@ -558,3 +572,9 @@ class KVCacheManager:
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
         self.coordinator.new_step_starts()
+
+    def free_session(self, session_id: str) -> dict:
+        return self.coordinator.free_session(session_id)
+    
+    def free_session_tree(self, session_id: str) -> dict:
+        return self.coordinator.free_session_tree(session_id)

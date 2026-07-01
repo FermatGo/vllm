@@ -6,9 +6,10 @@ import copy
 import hashlib
 import math
 import os
+import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from functools import partial
 from typing import Any, NewType, TypeAlias, cast, overload
 
@@ -130,6 +131,14 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # Record which sessions have referenced this block.
+    # A session references a block only once.
+    # Independent of ref_cnt.
+    _session_ref: set[str] = field(default_factory=set)
+
+    _ttl_expire_at: float = 0.0
+
+
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
@@ -157,6 +166,19 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
+    
+    @property
+    def session_ref(self) -> set[str]:
+        return self._session_ref
+
+    @property
+    def num_session_refs(self) -> int:
+        return len(self._session_ref)
+
+    @property
+    def is_ttl_protected(self) -> bool:
+        """block 是否在 TTL 保留期内(不能被重新分配)"""
+        return self._ttl_expire_at > 0 and time.monotonic() < self._ttl_expire_at
 
 
 class FreeKVCacheBlockQueue:
@@ -210,9 +232,21 @@ class FreeKVCacheBlockQueue:
             # For empty list, simply connect the fake head and tail.
             self.fake_free_list_head.next_free_block = self.fake_free_list_tail
             self.fake_free_list_tail.prev_free_block = self.fake_free_list_head
+        
+        # A zone: allocatable blocks without session refs.
+        # B zone: allocatable blocks with session refs.
+        # C zone: TTL-protected blocks.
+        # Assume all the blocks are in the A zone at first.
+        self.zone1_end: KVCacheBlock | None = (
+            blocks[-1] 
+            if self.num_free_blocks > 0 
+            else None)
+        self.zone2_end: KVCacheBlock | None = None
 
     def popleft(self) -> KVCacheBlock:
-        """Pop the first free block and reduce num_free_blocks by 1.
+        """Pop from zone A first, then zone B, and reduce num_free_blocks by 1.
+        Zone C is not allocatable unless a block's TTL has expired. When A/B are
+        empty, lazily scan C and promote expired blocks to A/B.
 
         Returns:
             The first free block.
@@ -226,16 +260,64 @@ class FreeKVCacheBlockQueue:
                 "with the free list."
             )
             raise ValueError("No free blocks available")
+        
+        # A zone does not exist and B zone does not exist. Remaining blocks, if
+        # any, are C-zone blocks. Lazily promote expired C-zone blocks.
+        if self.zone1_end is None and self.zone2_end is None:
+            curr_block = self.fake_free_list_head.next_free_block
+            while curr_block is not self.fake_free_list_tail:
+                if curr_block.next_free_block is None:
+                    raise RuntimeError(
+                        "Invalid block found in popleft() "
+                        "which doesn't have a valid next_free_block"
+                    )
 
-        first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
+                next_block = curr_block.next_free_block
 
-        if first_block.next_free_block is None:
-            # This should not happen if the block is from the free list.
-            # It indicates a bug in the caller's logic.
-            raise RuntimeError(
-                "Invalid block found in popleft() "
-                "which doesn't have a valid next_free_block"
-            )
+                if (
+                    curr_block._ttl_expire_at > 0
+                    and time.monotonic() >= curr_block._ttl_expire_at
+                ):
+                    curr_block._ttl_expire_at = 0.0
+                    if curr_block.num_session_refs > 0:
+                        self.promote_to_zone_b(curr_block)
+                    else:
+                        self.promote_to_zone_a(curr_block)
+                    break
+
+                curr_block = next_block
+        
+        # A zone exists: pop the head of A.
+        if self.zone1_end is not None:
+            first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
+            if first_block.next_free_block is None:
+                # This should not happen if the block is from the free list.
+                # It indicates a bug in the caller's logic.
+                raise RuntimeError(
+                    "Invalid block found in popleft() "
+                    "which doesn't have a valid next_free_block"
+                )
+
+            if first_block is self.zone1_end:
+                self.zone1_end = None
+
+        # A zone does not exist, B zone exists: pop the head of B.
+        elif self.zone2_end is not None:
+            first_block = self.fake_free_list_head.next_free_block
+            if first_block.next_free_block is None:
+                # This should not happen if the block is from the free list.
+                # It indicates a bug in the caller's logic.
+                raise RuntimeError(
+                    "Invalid block found in popleft() "
+                    "which doesn't have a valid next_free_block"
+                )
+
+            if first_block is self.zone2_end:
+                self.zone2_end = None
+
+        # A/B both do not exist. Remaining blocks, if any, are C-zone only.
+        else:
+            raise ValueError("No allocatable free blocks available")
 
         # Connect fake_head and the next block of first_block (i.e. second block
         # or fake tail).
@@ -292,10 +374,28 @@ class FreeKVCacheBlockQueue:
             # It indicates a bug in the caller's logic.
             raise RuntimeError(f"remove() called on an invalid block: {block}")
 
+        prev_block = block.prev_free_block
+        next_block = block.next_free_block
+
+        if block is self.zone1_end:
+            self.zone1_end = (
+                prev_block if prev_block is not self.fake_free_list_head else None
+            )
+
+        if block is self.zone2_end:
+            self.zone2_end = (
+                prev_block
+                if (
+                    prev_block is not self.fake_free_list_head
+                    and prev_block is not self.zone1_end
+                )
+                else None
+            )
+        
         # Link the previous block to the next block.
-        block.prev_free_block.next_free_block = block.next_free_block
+        prev_block.next_free_block = next_block
         # Link the next block to the previous block.
-        block.next_free_block.prev_free_block = block.prev_free_block
+        next_block.prev_free_block = prev_block
 
         # Remove the block from the linked list.
         block.prev_free_block = block.next_free_block = None
@@ -312,15 +412,31 @@ class FreeKVCacheBlockQueue:
             raise RuntimeError(
                 "prev_free_block of fake_free_list_tail should always exist"
             )
-        last_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
+        
+        if block.is_ttl_protected:
+            # C zone: append before fake tail, same as original append.
+            prev_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
 
-        # Connect the new block after the last block.
-        last_block.next_free_block = block
-        block.prev_free_block = last_block
+        elif block.num_session_refs > 0:
+            # B zone: insert after B tail, otherwise after A tail/head.
+            prev_block = self.zone2_end or self.zone1_end or self.fake_free_list_head
+            self.zone2_end = block
 
-        # Connect the fake tail after the new block.
-        block.next_free_block = self.fake_free_list_tail
-        self.fake_free_list_tail.prev_free_block = block
+        else:
+            # A zone: insert after A tail, otherwise after head.
+            prev_block = self.zone1_end or self.fake_free_list_head
+            self.zone1_end = block
+
+        next_block = prev_block.next_free_block
+        assert next_block is not None
+
+        # Connect the new block after prev_block.
+        prev_block.next_free_block = block
+        block.prev_free_block = prev_block
+
+        # Connect the next block after the new block.
+        block.next_free_block = next_block
+        next_block.prev_free_block = block
 
         self.num_free_blocks += 1
 
@@ -339,15 +455,7 @@ class FreeKVCacheBlockQueue:
         )
         # Add inter-connections between consecutive blocks
         for block in blocks:
-            block.prev_free_block = last_block
-            last_block.next_free_block = block
-            last_block = block
-
-        # Connect the last block of <blocks> to the fake tail
-        last_block.next_free_block = self.fake_free_list_tail
-        self.fake_free_list_tail.prev_free_block = last_block
-
-        self.num_free_blocks += len(blocks)
+            self.append(block)
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
@@ -368,6 +476,80 @@ class FreeKVCacheBlockQueue:
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
         return ret
+    
+    def promote_to_zone_a(self, block: KVCacheBlock) -> None:
+        """Move an existing free block to the tail of zone A."""
+        if block.prev_free_block is None or block.next_free_block is None:
+            raise RuntimeError(f"promote_to_zone_a() called on invalid block: {block}")
+
+        # Remove without changing num_free_blocks.
+        prev_block = block.prev_free_block
+        next_block = block.next_free_block
+
+        if block is self.zone1_end:
+            self.zone1_end = (
+                prev_block if prev_block is not self.fake_free_list_head else None
+            )
+        if block is self.zone2_end:
+            self.zone2_end = (
+                prev_block
+                if (
+                    prev_block is not self.fake_free_list_head
+                    and prev_block is not self.zone1_end
+                )
+                else None
+            )
+
+        prev_block.next_free_block = next_block
+        next_block.prev_free_block = prev_block
+
+        # Insert into A tail.
+        prev_block = self.zone1_end or self.fake_free_list_head
+        next_block = prev_block.next_free_block
+        assert next_block is not None
+
+        prev_block.next_free_block = block
+        block.prev_free_block = prev_block
+        block.next_free_block = next_block
+        next_block.prev_free_block = block
+        self.zone1_end = block
+    
+    def promote_to_zone_b(self, block: KVCacheBlock) -> None:
+        """Move an existing free block to the tail of zone B."""
+        if block.prev_free_block is None or block.next_free_block is None:
+            raise RuntimeError(f"promote_to_zone_b() called on invalid block: {block}")
+
+        # Remove without changing num_free_blocks.
+        prev_block = block.prev_free_block
+        next_block = block.next_free_block
+
+        if block is self.zone1_end:
+            self.zone1_end = (
+                prev_block if prev_block is not self.fake_free_list_head else None
+            )
+        if block is self.zone2_end:
+            self.zone2_end = (
+                prev_block
+                if (
+                    prev_block is not self.fake_free_list_head
+                    and prev_block is not self.zone1_end
+                )
+                else None
+            )
+
+        prev_block.next_free_block = next_block
+        next_block.prev_free_block = prev_block
+
+        # Insert into B tail.
+        prev_block = self.zone2_end or self.zone1_end or self.fake_free_list_head
+        next_block = prev_block.next_free_block
+        assert next_block is not None
+
+        prev_block.next_free_block = block
+        block.prev_free_block = prev_block
+        block.next_free_block = next_block
+        next_block.prev_free_block = block
+        self.zone2_end = block
 
 
 def need_extra_keys(request: Request) -> bool:
@@ -2122,3 +2304,29 @@ class BlockHashListWithBlockSize:
 
 
 BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
+
+class TTLTimerWheel:
+    """Best-effort timer wheel for TTL-protected free KV cache blocks.
+
+    This class does not mutate the free-block queue. It only tracks when a
+    block may become eligible for promotion out of zone C. Callers should
+    validate that returned blocks are still in the free queue, then call
+    FreeKVCacheBlockQueue.promote_to_zone_a/b() as appropriate.
+    """
+    def __init__(self, tick_count: int = 60):
+        self.slots: list[list[KVCacheBlock]] = [[] for _ in range(tick_count)]
+        self.current_slot = 0
+        self.tick_count = tick_count
+
+    def insert(self, block: KVCacheBlock, expire_at: float) -> None:
+        tick_index = int(expire_at) % self.tick_count
+        self.slots[tick_index].append(block)
+
+    def advance(self, now: float) -> list[KVCacheBlock]:
+        expired = []
+        target_slot = int(now) % self.tick_count
+        while self.current_slot != target_slot:
+            expired.extend(self.slots[self.current_slot])
+            self.slots[self.current_slot].clear()
+            self.current_slot = (self.current_slot + 1) % self.tick_count
+        return expired
