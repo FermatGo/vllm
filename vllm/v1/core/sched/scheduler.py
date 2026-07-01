@@ -349,6 +349,19 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    def free_session(self, session_id: str) -> bool:
+        """
+        free kv block for the session
+        :param session_id: str, the session is
+        :return: Bool
+        """
+        #TODO: 对接EngineCore及kv_cache_manager
+        logger.info(f"trying to free session {session_id}")
+        # free_result = self.kv_cache_manager.free_session(session_id)
+        # logger.info(f"free sesssion {session_id} kv with freed_blocks {free_result['freed_blocks']} and "
+        #             f"orphaned_blocks {free_result['orphaned_blocks']}")
+        return True
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
