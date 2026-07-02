@@ -1186,13 +1186,20 @@ class EngineCoreProc(EngineCore):
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
 
+            logger.warning(f'===== _process_agent_hint_session_management, req.session_id = {req.session_id}, req = {req}')
+
+            free_result = self.scheduler.free_session(req.session_id)
+
             list = [
                 EngineCoreOutput(req.request_id, [1], finish_reason=FinishReason.LENGTH,
                                  agent_hint_response=AgentHintSessionManagementResponse(
-                                     session_id="sid_112345",
-                                     freed_blocks=11,
-                                     orphaned_blocks=12,
-                                     children_freed=[]
+                                     session_id=free_result["session_id"],
+                                     freed_blocks=free_result["freed_blocks"],
+                                     orphaned_blocks=free_result["orphaned_blocks"],
+                                     children_freed=[AgentHintSessionManagementResponse(
+                                         session_id=s["session_id"],
+                                         freed_blocks=s["freed_blocks"],
+                                         orphaned_blocks=s["orphaned_blocks"] ) for s in free_result["sessions"]]
                                  ))
             ]
             outputs = EngineCoreOutputs(engine_index=req.client_index, outputs=list)

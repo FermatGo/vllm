@@ -363,6 +363,9 @@ class Scheduler(SchedulerInterface):
         #TODO: 对接EngineCore及kv_cache_manager
         logger.info(f"trying to free session {session_id}")
         free_result = self.kv_cache_manager.free_session(session_id)
+
+        logger.warning(f"===== free_session, free_result = {free_result}")
+
         logger.info(f"free sesssion {session_id} kv with freed_blocks {free_result['freed_blocks']} and "
                     f"orphaned_blocks {free_result['orphaned_blocks']}")
         return free_result
