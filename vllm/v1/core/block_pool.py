@@ -587,11 +587,25 @@ class BlockPool:
                 self._session_children[parent_session_id] = set()
             self._session_children[parent_session_id].add(session_id)
     
+        logger.info(
+            f"Registered session {session_id} with, "
+            f"parent {parent_session_id}, "
+            f"children {self._session_children.get(session_id)}"
+        )
+    
     def _record_block_session(self, block_id: int, session_id: str):
         """记录block属于哪个session(幂等操作)"""
         if session_id not in self.session_to_blocks:
             self.session_to_blocks[session_id] = set()
         self.session_to_blocks[session_id].add(block_id)
+
+        logger.info(
+            f"Recorded block {block_id} for session {session_id}. "
+            f"block._session_ref: {self.blocks[block_id]._session_ref}. "
+            f"block.ref_cnt: {self.blocks[block_id].ref_cnt}. "
+            f"block._ttl_expire_at: {self.blocks[block_id]._ttl_expire_at}. "
+            f"Current blocks for session: {self.session_to_blocks[session_id]}"
+        )
 
     def _remove_block_session(self, block_id: int, session_id: str):
         """移除block的session记录"""
@@ -599,6 +613,14 @@ class BlockPool:
             self.session_to_blocks[session_id].discard(block_id)
             if not self.session_to_blocks[session_id]:
                 del self.session_to_blocks[session_id]
+        
+        logger.info(
+            f"Removed block {block_id} from session {session_id}. "
+            f"block._session_ref: {self.blocks[block_id]._session_ref}. "
+            f"block.ref_cnt: {self.blocks[block_id].ref_cnt}. "
+            f"block._ttl_expire_at: {self.blocks[block_id]._ttl_expire_at}. "
+            f"Current blocks for session: {self.session_to_blocks[session_id]}"
+        )
     
     def get_session_blocks(self, session_id: str) -> set[int]:
         """Obtain all the block IDs of the session"""
@@ -610,6 +632,13 @@ class BlockPool:
         for session_id in list(block._session_ref):
             self._remove_block_session(block.block_id, session_id)
         block._session_ref.clear()
+
+        logger.info(
+            f"Cleared session references for block {block.block_id}. "
+            f"Current session references: {block._session_ref}"
+            f"block.ref_cnt: {block.ref_cnt}. "
+            f"block._ttl_expire_at: {block._ttl_expire_at}. "
+        )
     
     def free_session(self, session_id: str) -> dict:
         """按 session 清理 KV cache block。
@@ -666,6 +695,13 @@ class BlockPool:
         result = self.free_session(session_id)
         total_result["freed_blocks"] = result["freed_blocks"]
         total_result["orphaned_blocks"] = result["orphaned_blocks"]
+
+        logger.info(
+            f"Free session tree for session {session_id}: "
+            f"current session_to_blocks: {self.session_to_blocks}, "
+            f"session_parent: {self._session_parent}, "
+            f"session_children: {self._session_children}"
+        )
         return total_result
     
     def advance_ttl_timer(self) -> None:
@@ -696,5 +732,13 @@ class BlockPool:
 
             if block.num_session_refs > 0:
                 self.free_block_queue.promote_to_zone_b(block)
+                logger.info(f"promote to b block id {block.block_id}, "
+                            f"_session_ref id {block._session_ref}, "
+                            f"ttl is {block._ttl_expire_at}, "
+                            f"ref_cnt {block.ref_cnt}.")
             else:
                 self.free_block_queue.promote_to_zone_a(block)
+                logger.info(f"promote to a block id {block.block_id}, "
+                            f"_session_ref id {block._session_ref}, "
+                            f"ttl is {block._ttl_expire_at}, "
+                            f"ref_cnt {block.ref_cnt}.")

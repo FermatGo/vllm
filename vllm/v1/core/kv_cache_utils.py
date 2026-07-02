@@ -138,6 +138,13 @@ class KVCacheBlock:
 
     _ttl_expire_at: float = 0.0
 
+    logger.info(
+        f"KVCacheBlock created (block_id {block_id}, "
+        f"is_null {is_null}, "
+        f"ref_cnt {ref_cnt}, " 
+        f"_session_ref {_session_ref}, "
+        f"ttl_expire_at {_ttl_expire_at})"
+    )
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
@@ -281,8 +288,20 @@ class FreeKVCacheBlockQueue:
                     curr_block._ttl_expire_at = 0.0
                     if curr_block.num_session_refs > 0:
                         self.promote_to_zone_b(curr_block)
+                        logger.info(
+                            f"popleft: Promoted expired C-zone block id {curr_block.block_id} "
+                            f"to zone B."
+                            f"block._session_ref: {curr_block._session_ref}. "
+                            f"block._ttl_expire_at: {curr_block._ttl_expire_at}. "
+                        )
                     else:
                         self.promote_to_zone_a(curr_block)
+                        logger.info(
+                            f"popleft: Promoted expired C-zone block id {curr_block.block_id} "
+                            f"to zone A."
+                            f"block._session_ref: {curr_block._session_ref}. "
+                            f"block._ttl_expire_at: {curr_block._ttl_expire_at}. "
+                        )
                     break
 
                 curr_block = next_block
@@ -300,6 +319,7 @@ class FreeKVCacheBlockQueue:
 
             if first_block is self.zone1_end:
                 self.zone1_end = None
+            logger.info("popleft: Popping from zone A.")
 
         # A zone does not exist, B zone exists: pop the head of B.
         elif self.zone2_end is not None:
@@ -314,6 +334,7 @@ class FreeKVCacheBlockQueue:
 
             if first_block is self.zone2_end:
                 self.zone2_end = None
+            logger.info("popleft: Popping from zone B.")
 
         # A/B both do not exist. Remaining blocks, if any, are C-zone only.
         else:
@@ -326,6 +347,12 @@ class FreeKVCacheBlockQueue:
 
         # Remove the block from the linked list.
         first_block.prev_free_block = first_block.next_free_block = None
+
+        logger.info(
+            f"popleft: Popped block id {first_block.block_id} from free list."
+            f"block._session_ref: {first_block._session_ref}. "
+            f"block._ttl_expire_at: {first_block._ttl_expire_at}. "
+        )
 
         self.num_free_blocks -= 1
         return first_block
@@ -401,6 +428,12 @@ class FreeKVCacheBlockQueue:
         block.prev_free_block = block.next_free_block = None
         self.num_free_blocks -= 1
 
+        logger.info(
+            f"remove: Removing block id {block.block_id} from free list. "
+            f"block._session_ref: {block._session_ref}. "
+            f"block._ttl_expire_at: {block._ttl_expire_at}. "
+        )
+
     def append(self, block: KVCacheBlock) -> None:
         """Put a block back into the free list and increase
         num_free_blocks by 1.
@@ -414,15 +447,18 @@ class FreeKVCacheBlockQueue:
             )
         
         if block.is_ttl_protected:
+            logger.info(f"append: Appending TTL-protected block id {block.block_id} to free list.")
             # C zone: append before fake tail, same as original append.
             prev_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
 
         elif block.num_session_refs > 0:
+            logger.info(f"append: Appending block id {block.block_id} to zone B.")
             # B zone: insert after B tail, otherwise after A tail/head.
             prev_block = self.zone2_end or self.zone1_end or self.fake_free_list_head
             self.zone2_end = block
 
         else:
+            logger.info(f"append: Appending block id {block.block_id} to zone A.")
             # A zone: insert after A tail, otherwise after head.
             prev_block = self.zone1_end or self.fake_free_list_head
             self.zone1_end = block
@@ -439,6 +475,11 @@ class FreeKVCacheBlockQueue:
         next_block.prev_free_block = block
 
         self.num_free_blocks += 1
+
+        logger.info(
+            f"block._session_ref: {block._session_ref}. "
+            f"block._ttl_expire_at: {block._ttl_expire_at}. "
+        )
 
     def append_n(self, blocks: list[KVCacheBlock]) -> None:
         """Put a list of blocks back into the free list
@@ -513,6 +554,12 @@ class FreeKVCacheBlockQueue:
         block.next_free_block = next_block
         next_block.prev_free_block = block
         self.zone1_end = block
+
+        logger.info(
+            f"promote_to_zone_a: Promoting block id {block.block_id} to zone A."
+            f"block._session_ref: {block._session_ref}. "
+            f"block._ttl_expire_at: {block._ttl_expire_at}. "
+        )
     
     def promote_to_zone_b(self, block: KVCacheBlock) -> None:
         """Move an existing free block to the tail of zone B."""
@@ -550,6 +597,12 @@ class FreeKVCacheBlockQueue:
         block.next_free_block = next_block
         next_block.prev_free_block = block
         self.zone2_end = block
+
+        logger.info(
+            f"promote_to_zone_b: Promoting block id {block.block_id} to zone B."
+            f"block._session_ref: {block._session_ref}. "
+            f"block._ttl_expire_at: {block._ttl_expire_at}. "
+        )
 
 
 def need_extra_keys(request: Request) -> bool:
@@ -2317,10 +2370,22 @@ class TTLTimerWheel:
         self.slots: list[list[KVCacheBlock]] = [[] for _ in range(tick_count)]
         self.current_slot = 0
         self.tick_count = tick_count
+        
+        logger.info(
+            f"Initialized TTLTimerWheel with {tick_count} slots."
+        )
 
     def insert(self, block: KVCacheBlock, expire_at: float) -> None:
         tick_index = int(expire_at) % self.tick_count
         self.slots[tick_index].append(block)
+        
+        logger.info(
+            f"Inserting block {block.block_id} into TTLTimerWheel, "
+            f"block._session_ref={block._session_ref},"
+            f"block._ttl_expire_at={block._ttl_expire_at:.2f}, "
+            f"block.ref_cnt={block.ref_cnt}, "
+            f"with expire_at={expire_at:.2f}"
+        )
 
     def advance(self, now: float) -> list[KVCacheBlock]:
         expired = []
@@ -2329,4 +2394,11 @@ class TTLTimerWheel:
             expired.extend(self.slots[self.current_slot])
             self.slots[self.current_slot].clear()
             self.current_slot = (self.current_slot + 1) % self.tick_count
+        
+        logger.info(
+            f"Advancing TTLTimerWheel to time {now:.2f}, "
+            f"(current_slot={self.current_slot})."
+            f" Expired blocks: {[block.block_id for block in expired]}."
+        )
+
         return expired
