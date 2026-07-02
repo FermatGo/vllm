@@ -39,6 +39,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.agentic_cache_ttl_manager import AgenticCacheTTLManager
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -245,6 +246,10 @@ class Scheduler(SchedulerInterface):
         ):
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
+        self.ttl_manager = AgenticCacheTTLManager(
+            self_check_ttl=self.kv_cache_manager.block_pool.advance_ttl_timer,
+        )
+
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         self.scheduler_reserve_full_isl = (
@@ -349,7 +354,7 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
-    def free_session(self, session_id: str) -> bool:
+    def free_session(self, session_id: str) -> dict:
         """
         free kv block for the session
         :param session_id: str, the session is
@@ -357,10 +362,10 @@ class Scheduler(SchedulerInterface):
         """
         #TODO: 对接EngineCore及kv_cache_manager
         logger.info(f"trying to free session {session_id}")
-        # free_result = self.kv_cache_manager.free_session(session_id)
-        # logger.info(f"free sesssion {session_id} kv with freed_blocks {free_result['freed_blocks']} and "
-        #             f"orphaned_blocks {free_result['orphaned_blocks']}")
-        return True
+        free_result = self.kv_cache_manager.free_session(session_id)
+        logger.info(f"free sesssion {session_id} kv with freed_blocks {free_result['freed_blocks']} and "
+                    f"orphaned_blocks {free_result['orphaned_blocks']}")
+        return free_result
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -399,6 +404,10 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+        logger.info("start to check cache ttl in scheduler")
+        self.ttl_manager.check_cache_ttl()
+        logger.info("finish to check cache ttl in scheduler")
+
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 

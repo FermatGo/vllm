@@ -69,14 +69,18 @@ class AgenticCacheTTLManager():
         all blocks from *start* to the session's last block.
     """
 
+    # _REQUIRED_CALLBACKS: list[str] = [
+    #     "iter_blocks",
+    #     "get_block_by_id",
+    #     "filter_by_ttl_expired",
+    #     "filter_by_no_session",
+    #     "demote_ttl_expired",
+    #     "demote_no_session",
+    #     "apply_modification",
+    # ]
+
     _REQUIRED_CALLBACKS: list[str] = [
-        "iter_blocks",
-        "get_block_by_id",
-        "filter_by_ttl_expired",
-        "filter_by_no_session",
-        "demote_ttl_expired",
-        "demote_no_session",
-        "apply_modification",
+        "self_check_ttl"
     ]
 
     def __init__(
@@ -148,10 +152,18 @@ class AgenticCacheTTLManager():
 
     def get_all_cache_info(self):
         """Return information for every managed block."""
+        fn = self._registry.get("iter_blocks")
+        if fn is None:
+            logger.info(f"callback 'iter_blocks' is not available in ttl manager")
+            return
         return list(self._registry["iter_blocks"]())
 
     def get_cache_info_by_id(self, block_id: int):
         """Return information for a single block identified by *block_id*."""
+        fn = self._registry.get("get_block_by_id")
+        if fn is None:
+            logger.info(f"callback 'get_block_by_id' is not available in ttl manager")
+            return
         return self._registry["get_block_by_id"](block_id)
 
     def check_cache_ttl(self):
@@ -170,23 +182,13 @@ class AgenticCacheTTLManager():
         (expired_ids, no_session_ids) : tuple[list[int], list[int]]
             IDs of blocks processed in each step.
         """
-        # Step 1: TTL 过期 → 降级
-        expired_ids: list[int] = self._registry["filter_by_ttl_expired"]()
-        if expired_ids:
-            logger.info("TTL expired blocks: %s, demoting", expired_ids)
-            self._registry["demote_ttl_expired"](expired_ids)
-        else:
-            logger.debug("No TTL-expired blocks found")
+        fn = self._registry.get("self_check_ttl")
+        if fn is None:
+            logger.warning(f"callback 'self_check_ttl' is not available in ttl manager")
+            return
+        self._registry["self_check_ttl"]()
 
-        # Step 2: 无 session → 降级
-        no_session_ids: list[int] = self._registry["filter_by_no_session"]()
-        if no_session_ids:
-            logger.info("Session-free blocks: %s, demoting", no_session_ids)
-            self._registry["demote_no_session"](no_session_ids)
-        else:
-            logger.debug("No session-free blocks found")
 
-        return expired_ids, no_session_ids
 
     def prevent_oom(self):
         """Force-demote blocks to prevent OOM.
@@ -204,7 +206,7 @@ class AgenticCacheTTLManager():
         """
         fn = self._registry.get("demote_to_prevent_oom")
         if fn is None:
-            logger.debug("demote_to_prevent_oom not registered, skipping")
+            logger.info("demote_to_prevent_oom not registered, skipping")
             return []
         demoted_ids: list[int] = fn()
         if demoted_ids:
@@ -220,7 +222,7 @@ class AgenticCacheTTLManager():
         Main function to run ttl-manager. Required to check ttl and optional to prevent OOM
         """
         self.check_cache_ttl()
-        self.prevent_oom()
+        #self.prevent_oom()
 
     def modify_cache_info(self, cache_todo_info: CacheModifiedInfo):
         """Apply the modification described in *cache_todo_info*.
@@ -235,5 +237,11 @@ class AgenticCacheTTLManager():
                      cache_todo_info.local_start_block_id,
                      cache_todo_info.local_stop_block_id,
                      cache_todo_info.cache_action)
+
+        fn = self._registry.get("apply_modification")
+        if fn is None:
+            logger.info(f"callback 'apply_modification' is not available in ttl manager")
+            return
+
         self._registry["apply_modification"](cache_todo_info)
 

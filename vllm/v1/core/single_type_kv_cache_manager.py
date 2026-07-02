@@ -81,6 +81,9 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
 
+        # request_id -> ttl seconds. None means no TTL protection.
+        self.request_ttl_map: dict[str, float | None] = {}
+
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
         return sum(blk.ref_cnt == 0 and not blk.is_null for blk in blocks)
@@ -172,6 +175,7 @@ class SingleTypeKVCacheManager(ABC):
         new_computed_blocks: Sequence[KVCacheBlock],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        session_id: str | None = None,
     ) -> None:
         """
         Add the new computed blocks to the request. This involves three steps:
@@ -187,6 +191,7 @@ class SingleTypeKVCacheManager(ABC):
                 prefix cache.
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
+            session_id: The session ID.
         """
 
         if request_id in self.num_cached_block:
@@ -215,7 +220,7 @@ class SingleTypeKVCacheManager(ABC):
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self.block_pool.touch(new_computed_blocks)
+            self.block_pool.touch(new_computed_blocks, session_id)
         else:
             assert not any(new_computed_blocks), (
                 "Computed blocks should be empty when prefix caching is disabled"
@@ -240,7 +245,11 @@ class SingleTypeKVCacheManager(ABC):
                 self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self, 
+        request_id: str, 
+        num_tokens: int, 
+        num_tokens_main_model: int,
+        session_id: str | None = None,
     ) -> list[KVCacheBlock]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -262,7 +271,7 @@ class SingleTypeKVCacheManager(ABC):
         if num_new_blocks <= 0:
             return []
         else:
-            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks, session_id)
             req_blocks.extend(new_blocks)
             if type(self.kv_cache_spec) in (FullAttentionSpec, TQFullAttentionSpec):
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
@@ -314,7 +323,8 @@ class SingleTypeKVCacheManager(ABC):
         # freed first.
         ordered_blocks = reversed(req_blocks)
 
-        self.block_pool.free_blocks(ordered_blocks)
+        ttl = self.request_ttl_map.pop(request_id, None)
+        self.block_pool.free_blocks(ordered_blocks, ttl=ttl)
         self.num_cached_block.pop(request_id, None)
 
     @abstractmethod
@@ -346,6 +356,7 @@ class SingleTypeKVCacheManager(ABC):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        session_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than
@@ -441,6 +452,15 @@ class SingleTypeKVCacheManager(ABC):
     def new_step_starts(self) -> None:
         # do nothing by default
         return None
+    
+    def free_session(self, session_id: str) -> dict:
+        return self.block_pool.free_session(session_id)
+    
+    def free_session_tree(self, session_id: str) -> dict:
+        return self.block_pool.free_session_tree(session_id)
+    
+    def record_request_ttl(self, request_id: str, ttl: float | None) -> None:
+        self.request_ttl_map[request_id] = ttl
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
@@ -456,6 +476,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        session_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
@@ -475,7 +496,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
             if cached_block := block_pool.get_cached_block(
-                block_hash, kv_cache_group_ids
+                block_hash, kv_cache_group_ids, session_id
             ):
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed.append(cached)
@@ -521,6 +542,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        session_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
@@ -556,7 +578,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
+                block_hashes[i], kv_cache_group_ids, session_id
             ):
                 # Skip prefix matching check if the block is not aligned with
                 # `alignment_tokens`.
@@ -658,6 +680,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        session_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         For chunked local attention, we need to find the longest cache hit
@@ -730,7 +753,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         for i in range(local_attention_start_block_idx, max_num_blocks):
             block_hash = block_hashes[i]
             if cached_block := block_pool.get_cached_block(
-                block_hash, kv_cache_group_ids
+                block_hash, kv_cache_group_ids, session_id
             ):
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed.append(cached)
@@ -818,6 +841,7 @@ class MambaManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        session_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
@@ -833,7 +857,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
+                block_hashes[i], kv_cache_group_ids, session_id
             ):
                 # When enable Mamba prefix caching, `block_size` will be aligned
                 # across full attention layers and Mamba layers to ensure the
@@ -958,7 +982,11 @@ class MambaManager(SingleTypeKVCacheManager):
             return num_new_blocks + num_evictable_computed_blocks
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self, 
+        request_id: str, 
+        num_tokens: int, 
+        num_tokens_main_model: int,
+        session_id: str | None = None,
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
@@ -967,7 +995,7 @@ class MambaManager(SingleTypeKVCacheManager):
             if self.num_speculative_blocks > 0:
                 num_tokens += self.block_size * self.num_speculative_blocks
             return super().allocate_new_blocks(
-                request_id, num_tokens, num_tokens_main_model
+                request_id, num_tokens, num_tokens_main_model, session_id
             )
         else:
             # We don't allocate blocks for lookahead tokens in align mode, because if
@@ -1030,7 +1058,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     assert num_new_blocks <= 1
                 else:
                     assert num_new_blocks <= self.num_speculative_blocks + 1
-                new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+                new_blocks = self.block_pool.get_new_blocks(num_new_blocks, session_id)
                 req_blocks.extend(new_blocks)
                 self._allocated_block_reqs.add(request_id)
                 return req_blocks[prev_block_len:]
@@ -1075,6 +1103,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         new_computed_blocks: Sequence[KVCacheBlock],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        session_id: str | None = None,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so  `new_computed_blocks` should always be empty.
@@ -1102,6 +1131,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        session_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
