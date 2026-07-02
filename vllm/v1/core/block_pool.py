@@ -619,7 +619,6 @@ class BlockPool:
             f"block._session_ref: {self.blocks[block_id]._session_ref}. "
             f"block.ref_cnt: {self.blocks[block_id].ref_cnt}. "
             f"block._ttl_expire_at: {self.blocks[block_id]._ttl_expire_at}. "
-            f"Current blocks for session: {self.session_to_blocks[session_id]}"
         )
     
     def get_session_blocks(self, session_id: str) -> set[int]:

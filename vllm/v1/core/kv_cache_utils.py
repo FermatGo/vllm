@@ -138,13 +138,6 @@ class KVCacheBlock:
 
     _ttl_expire_at: float = 0.0
 
-    logger.info(
-        f"KVCacheBlock created (block_id {block_id}, "
-        f"is_null {is_null}, "
-        f"ref_cnt {ref_cnt}, " 
-        f"_session_ref {_session_ref}, "
-        f"ttl_expire_at {_ttl_expire_at})"
-    )
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
