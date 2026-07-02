@@ -361,7 +361,7 @@ class Scheduler(SchedulerInterface):
         :return: Bool
         """
         logger.info(f"trying to free session {session_id}")
-        free_result = self.kv_cache_manager.free_session(session_id)
+        free_result = self.kv_cache_manager.free_session_tree(session_id)
 
         logger.warning(f"===== free_session, free_result = {free_result}")
 

@@ -284,8 +284,10 @@ class KVCacheCoordinator(ABC):
         return free_result
 
     def free_session_tree(self, session_id: str) -> dict:
-        for manager in self.single_type_managers:
-            manager.free_session_tree(session_id)
+        free_result = None
+        for manager in self.single_type_managers:  # todo 多个manager如何返回
+            free_result = manager.free_session_tree(session_id)
+        return free_result
     
     def record_request_ttl(self, request_id: str, ttl: float | None) -> None:
         for manager in self.single_type_managers:
