@@ -1,5 +1,3 @@
-#TODO: 某session对应的部分block，由于同时被其他block占用，无法把完整的全部block加入free queue当中，如何进行block粒度的保护
-
 from typing import Optional, Callable, Any
 from enum import Enum
 from dataclasses import dataclass
@@ -38,6 +36,11 @@ class AgenticCacheTTLManager():
       - demote_ttl_expired : TTL 过期的 block 需要降级
       - demote_no_session  : 没有 session 的 block 需要降级
 
+    Built-in callback names
+    -----------------------
+    self_check_ttl -> None
+        filter the blocks with ttl overtime and demote them to the corresponding zone
+
     Optional callbacks
     ------------------
     demote_to_prevent_oom  () -> list[int]
@@ -45,9 +48,6 @@ class AgenticCacheTTLManager():
         are in active zone and none can be reclaimed through normal TTL
         or session checks).  The manager will pass the returned IDs to
         demote_ttl_expired.
-
-    Built-in callback names
-    -----------------------
     iter_blocks            () -> Iterable[Any]
         Iterate over all managed blocks.
     get_block_by_id        (block_id: int) -> Any | None

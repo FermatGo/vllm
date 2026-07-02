@@ -360,7 +360,6 @@ class Scheduler(SchedulerInterface):
         :param session_id: str, the session is
         :return: Bool
         """
-        #TODO: 对接EngineCore及kv_cache_manager
         logger.info(f"trying to free session {session_id}")
         free_result = self.kv_cache_manager.free_session(session_id)
 
