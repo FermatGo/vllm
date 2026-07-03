@@ -586,7 +586,7 @@ class BlockPool:
             if parent_session_id not in self._session_children:
                 self._session_children[parent_session_id] = set()
             self._session_children[parent_session_id].add(session_id)
-    
+
         logger.info(
             f"Registered session {session_id} with, "
             f"parent {parent_session_id}, "
@@ -687,13 +687,13 @@ class BlockPool:
     
     def free_session_tree(self, session_id: str) -> dict:
         """递归清理session及其所有子session"""
-        total_result = {"session_id": session_id, "sessions": []}
+        children_freed = []
+
         for child_sid in list(self._session_children.get(session_id, set())):
             child_result = self.free_session_tree(child_sid)
-            total_result["sessions"].append(child_result)
+            children_freed.append(child_result)
+
         result = self.free_session(session_id)
-        total_result["freed_blocks"] = result["freed_blocks"]
-        total_result["orphaned_blocks"] = result["orphaned_blocks"]
 
         logger.info(
             f"Free session tree for session {session_id}: "
@@ -701,7 +701,13 @@ class BlockPool:
             f"session_parent: {self._session_parent}, "
             f"session_children: {self._session_children}"
         )
-        return total_result
+
+        return {
+            "session_id": session_id,
+            "freed_blocks": result["freed_blocks"],
+            "orphaned_blocks": result["orphaned_blocks"],
+            "sessions": children_freed,
+        }
     
     def advance_ttl_timer(self) -> None:
         """Promote expired TTL-protected free blocks from zone C to A/B."""

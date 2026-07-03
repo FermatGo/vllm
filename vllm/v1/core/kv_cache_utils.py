@@ -138,7 +138,6 @@ class KVCacheBlock:
 
     _ttl_expire_at: float = 0.0
 
-
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
@@ -243,7 +242,7 @@ class FreeKVCacheBlockQueue:
             else None)
         self.zone2_end: KVCacheBlock | None = None
 
-    def popleft(self) -> KVCacheBlock:
+    def popleft(self, check_ttl: bool = True) -> KVCacheBlock:
         """Pop from zone A first, then zone B, and reduce num_free_blocks by 1.
         Zone C is not allocatable unless a block's TTL has expired. When A/B are
         empty, lazily scan C and promote expired blocks to A/B.
@@ -260,13 +259,18 @@ class FreeKVCacheBlockQueue:
                 "with the free list."
             )
             raise ValueError("No free blocks available")
-        
-        # A zone does not exist and B zone does not exist. Remaining blocks, if
-        # any, are C-zone blocks. Lazily promote expired C-zone blocks.
-        if self.zone1_end is None and self.zone2_end is None:
-            curr_block = self.fake_free_list_head.next_free_block
+
+        if check_ttl:
+            # Lazy TTL expiry: scan C zone first, promote expired blocks to A/B.
+            if self.zone2_end is not None:
+                curr_block = self.zone2_end.next_free_block
+            elif self.zone1_end is not None:
+                curr_block = self.zone1_end.next_free_block
+            else:
+                curr_block = self.fake_free_list_head.next_free_block
+
             while curr_block is not self.fake_free_list_tail:
-                if curr_block.next_free_block is None:
+                if curr_block is None or curr_block.next_free_block is None:
                     raise RuntimeError(
                         "Invalid block found in popleft() "
                         "which doesn't have a valid next_free_block"
@@ -295,43 +299,26 @@ class FreeKVCacheBlockQueue:
                             f"block._session_ref: {curr_block._session_ref}. "
                             f"block._ttl_expire_at: {curr_block._ttl_expire_at}. "
                         )
-                    break
 
                 curr_block = next_block
-        
-        # A zone exists: pop the head of A.
-        if self.zone1_end is not None:
-            first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
-            if first_block.next_free_block is None:
-                # This should not happen if the block is from the free list.
-                # It indicates a bug in the caller's logic.
-                raise RuntimeError(
-                    "Invalid block found in popleft() "
-                    "which doesn't have a valid next_free_block"
-                )
 
-            if first_block is self.zone1_end:
-                self.zone1_end = None
-            logger.info("popleft: Popping from zone A.")
-
-        # A zone does not exist, B zone exists: pop the head of B.
-        elif self.zone2_end is not None:
-            first_block = self.fake_free_list_head.next_free_block
-            if first_block.next_free_block is None:
-                # This should not happen if the block is from the free list.
-                # It indicates a bug in the caller's logic.
-                raise RuntimeError(
-                    "Invalid block found in popleft() "
-                    "which doesn't have a valid next_free_block"
-                )
-
-            if first_block is self.zone2_end:
-                self.zone2_end = None
-            logger.info("popleft: Popping from zone B.")
-
-        # A/B both do not exist. Remaining blocks, if any, are C-zone only.
-        else:
+        if self.zone1_end is None and self.zone2_end is None:
             raise ValueError("No allocatable free blocks available")
+
+        first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
+
+        if first_block.next_free_block is None:
+            # This should not happen if the block is from the free list.
+            # It indicates a bug in the caller's logic.
+            raise RuntimeError(
+                "Invalid block found in popleft() "
+                "which doesn't have a valid next_free_block"
+            )
+
+        if first_block is self.zone1_end:
+            self.zone1_end = None
+        if first_block is self.zone2_end:
+            self.zone2_end = None
 
         # Connect fake_head and the next block of first_block (i.e. second block
         # or fake tail).
@@ -351,7 +338,7 @@ class FreeKVCacheBlockQueue:
         return first_block
 
     def popleft_n(self, n: int) -> list[KVCacheBlock]:
-        """Pop the first n free blocks and reduce num_free_blocks by n.
+        """Pop the first n allocatable free blocks and reduce num_free_blocks by n.
 
         Args:
             n: The number of blocks to pop.
@@ -362,25 +349,10 @@ class FreeKVCacheBlockQueue:
         if n == 0:
             return []
         assert self.num_free_blocks >= n
-        self.num_free_blocks -= n
 
-        curr_block = self.fake_free_list_head.next_free_block
-        # Pop n blocks from the head of the list
-        ret = []
-        for _ in range(n):
-            assert curr_block is not None
-            ret.append(curr_block)
-            last_block = curr_block
-            curr_block = curr_block.next_free_block
-            # Reset prev_free_block and next_free_block of all popped blocks
-            last_block.prev_free_block = None
-            last_block.next_free_block = None
-
-        if curr_block is not None:
-            # The queue is not empty, connect the fake head to
-            # the new first block.
-            self.fake_free_list_head.next_free_block = curr_block
-            curr_block.prev_free_block = self.fake_free_list_head
+        ret = [self.popleft(check_ttl=True)]
+        for _ in range(1, n):
+            ret.append(self.popleft(check_ttl=False))
         return ret
 
     def remove(self, block: KVCacheBlock) -> None:
@@ -516,14 +488,13 @@ class FreeKVCacheBlockQueue:
         if block.prev_free_block is None or block.next_free_block is None:
             raise RuntimeError(f"promote_to_zone_a() called on invalid block: {block}")
 
+        if block is self.zone1_end:
+            return
+
         # Remove without changing num_free_blocks.
         prev_block = block.prev_free_block
         next_block = block.next_free_block
 
-        if block is self.zone1_end:
-            self.zone1_end = (
-                prev_block if prev_block is not self.fake_free_list_head else None
-            )
         if block is self.zone2_end:
             self.zone2_end = (
                 prev_block
@@ -559,6 +530,9 @@ class FreeKVCacheBlockQueue:
         if block.prev_free_block is None or block.next_free_block is None:
             raise RuntimeError(f"promote_to_zone_b() called on invalid block: {block}")
 
+        if block is self.zone2_end:
+            return
+
         # Remove without changing num_free_blocks.
         prev_block = block.prev_free_block
         next_block = block.next_free_block
@@ -566,15 +540,6 @@ class FreeKVCacheBlockQueue:
         if block is self.zone1_end:
             self.zone1_end = (
                 prev_block if prev_block is not self.fake_free_list_head else None
-            )
-        if block is self.zone2_end:
-            self.zone2_end = (
-                prev_block
-                if (
-                    prev_block is not self.fake_free_list_head
-                    and prev_block is not self.zone1_end
-                )
-                else None
             )
 
         prev_block.next_free_block = next_block
