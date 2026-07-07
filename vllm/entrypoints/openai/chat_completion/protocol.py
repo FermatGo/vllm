@@ -865,13 +865,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def _validate_agent_hint(self) -> "ChatCompletionRequest":
         if self.agent_hint is None:
             return self
-        # session_id 和 parent_session_id 不能相同
-        if (self.agent_hint.session_id is not None
-                and self.agent_hint.parent_session_id is not None
-                and self.agent_hint.session_id == self.agent_hint.parent_session_id):
-            raise ValueError(
-                "agent_hint.session_id and agent_hint.parent_session_id must be different"
-            )
+
         # cache_control.ttl > 0 时，session_id 建议提供
         if (self.agent_hint.cache_control is not None
                 and self.agent_hint.cache_control.ttl > 0
