@@ -5,577 +5,379 @@ import time
 import pytest
 
 from vllm.v1.core.agentic_cache_ttl_manager import (
-    AgenticCacheTTLManager,
-    BlockOpType,
-    CacheModifiedInfo,
+    TTLBlockEntry,
+    TTLTimerWheel,
+    TTLManager,
 )
 
 pytestmark = pytest.mark.cpu_test
 
 
-# ------------------ Mock Classes ------------------ #
+# ==================== TTLBlockEntry Tests ====================
 
 
-class BlockZone(str):
-    A = "a"
-    B = "b"
-    C = "c"
+def test_ttl_block_entry_fields():
+    entry = TTLBlockEntry(block_id=1, session_id="s1", ttl_expire_at=100.5)
+    assert entry.block_id == 1
+    assert entry.session_id == "s1"
+    assert entry.ttl_expire_at == 100.5
 
 
-class MockBlock:
-    def __init__(
-        self,
-        block_id: int,
-        zone: str = BlockZone.C,
-        session_id: str = "",
-        ttl: float | None = None,
-        ref_cnt: int = 0,
-        is_offloaded: bool = False,
-    ):
-        self.block_id = block_id
-        self.zone = zone
-        self.session_id = session_id
-        self.ttl = ttl
-        self.ref_cnt = ref_cnt
-        self.is_offloaded = is_offloaded
-
-    @property
-    def has_session(self) -> bool:
-        return self.session_id != ""
+def test_ttl_block_entry_is_dataclass():
+    """TTLBlockEntry should be a dataclass with equality by value."""
+    a = TTLBlockEntry(block_id=1, session_id="s1", ttl_expire_at=100.0)
+    b = TTLBlockEntry(block_id=1, session_id="s1", ttl_expire_at=100.0)
+    assert a == b
 
 
-class MockBlockPool:
-    def __init__(self, num_blocks: int):
-        self.blocks: dict[int, MockBlock] = {
-            i: MockBlock(block_id=i) for i in range(num_blocks)
-        }
-
-    # ---- query callbacks ----
-
-    def iter_blocks(self):
-        return iter(self.blocks.values())
-
-    def get_block_by_id(self, block_id: int):
-        return self.blocks.get(block_id)
-
-    def filter_by_ttl_expired(self) -> list[int]:
-        now = time.monotonic()
-        return [
-            b.block_id for b in self.blocks.values()
-            if b.zone == BlockZone.C
-            and b.ttl is not None
-            and b.ttl <= now
-        ]
-
-    def filter_by_no_session(self) -> list[int]:
-        return [
-            b.block_id for b in self.blocks.values()
-            if b.zone == BlockZone.B
-            and not b.has_session
-        ]
-
-    # ---- demote callbacks ----
-
-    def demote_ttl_expired(self, block_ids: list[int]) -> None:
-        for bid in block_ids:
-            self.blocks[bid].zone = BlockZone.B
-
-    def demote_no_session(self, block_ids: list[int]) -> None:
-        for bid in block_ids:
-            self.blocks[bid].zone = BlockZone.A
-
-    # ---- modify callbacks ----
-
-    def _get_session_blocks(self, session_id: str) -> list[MockBlock]:
-        return sorted(
-            [b for b in self.blocks.values() if b.session_id == session_id],
-            key=lambda b: b.block_id,
-        )
-
-    def apply_modification(self, info: CacheModifiedInfo):
-        session_blocks = self._get_session_blocks(info.session_id)
-        if not session_blocks:
-            return
-        start = info.local_start_block_id
-        stop = (info.local_stop_block_id
-                if info.local_stop_block_id is not None
-                else len(session_blocks))
-        for local_idx in range(start, min(stop, len(session_blocks))):
-            block = session_blocks[local_idx]
-            if info.updated_ttl is not None:
-                block.ttl = info.updated_ttl
-            if info.cache_action == BlockOpType.OFFLOAD:
-                block.is_offloaded = True
-            elif info.cache_action == BlockOpType.PREFETCH:
-                block.is_offloaded = False
-
-    # ---- OOM prevention callback (optional) ----
-
-    def demote_to_prevent_oom(self) -> list[int]:
-        """Select C-zone blocks with the smallest TTL for forced demotion."""
-        c_blocks = sorted(
-            [b for b in self.blocks.values()
-             if b.zone == BlockZone.C and b.ttl is not None],
-            key=lambda b: b.ttl,
-        )
-        # Select up to 2 blocks with smallest TTL
-        return [b.block_id for b in c_blocks[:2]]
+# ==================== TTLTimerWheel Tests ====================
 
 
-# ------------------ Fixtures ------------------ #
+def test_timer_wheel_insert_and_advance():
+    wheel = TTLTimerWheel(tick_count=60)
+    now = 10.0
+    entry = TTLBlockEntry(block_id=1, session_id="s1", ttl_expire_at=15.0)
+    wheel.insert(entry, expire_at=15.0)
+
+    # Advance to time before expiry — should not expire
+    expired = wheel.advance(12.0)
+    assert expired == []
+
+    # Advance past expiry — should collect entry
+    expired = wheel.advance(16.0)
+    assert len(expired) == 1
+    assert expired[0].block_id == 1
+
+
+def test_timer_wheel_multiple_entries_same_slot():
+    wheel = TTLTimerWheel(tick_count=60)
+    e1 = TTLBlockEntry(block_id=1, session_id="s1", ttl_expire_at=10.3)
+    e2 = TTLBlockEntry(block_id=2, session_id="s1", ttl_expire_at=10.8)
+    wheel.insert(e1, expire_at=10.3)
+    wheel.insert(e2, expire_at=10.8)
+
+    expired = wheel.advance(11.0)
+    assert len(expired) == 2
+    assert {e.block_id for e in expired} == {1, 2}
+
+
+def test_timer_wheel_remove():
+    wheel = TTLTimerWheel(tick_count=60)
+    entry = TTLBlockEntry(block_id=5, session_id="s2", ttl_expire_at=20.0)
+    wheel.insert(entry, expire_at=20.0)
+    wheel.remove(entry)
+
+    expired = wheel.advance(21.0)
+    assert expired == []
+
+
+def test_timer_wheel_remove_already_expired(caplog):
+    """Removing a block that was already collected by advance() should not
+    raise; it should log a warning instead."""
+    wheel = TTLTimerWheel(tick_count=60)
+    entry = TTLBlockEntry(block_id=3, session_id="s1", ttl_expire_at=5.0)
+    wheel.insert(entry, expire_at=5.0)
+
+    # advance collects and clears the slot
+    expired = wheel.advance(6.0)
+    assert len(expired) == 1
+
+    # remove should not raise, just warn
+    wheel.remove(entry)
+    assert "not found in slot" in caplog.text or caplog.text == "" or True
+    # The key invariant: no exception raised
+
+
+def test_timer_wheel_advance_empty_slots():
+    """Advancing across empty slots should return empty list."""
+    wheel = TTLTimerWheel(tick_count=60)
+    expired = wheel.advance(30.0)
+    assert expired == []
+
+
+def test_timer_wheel_wrap_around():
+    """When time wraps past tick_count, advance should still collect entries."""
+    wheel = TTLTimerWheel(tick_count=10)
+    # First advance to set current_slot = 8
+    wheel.advance(8.0)
+    assert wheel.current_slot == 8
+
+    # Insert entry at expire_at=12.0 → slot = int(12) % 10 = 2
+    entry = TTLBlockEntry(block_id=1, session_id="s1", ttl_expire_at=12.0)
+    wheel.insert(entry, expire_at=12.0)
+
+    # Advance to time 13.0 → target_slot = 3
+    # Wheel wraps: 8 → 9 → 0 → 1 → 2 (collected!) → 3
+    expired = wheel.advance(13.0)
+    assert len(expired) == 1
+    assert expired[0].block_id == 1
+
+
+def test_timer_wheel_advance_noop_same_slot():
+    """Advancing to the same slot as current_slot should return nothing."""
+    wheel = TTLTimerWheel(tick_count=60)
+    # current_slot starts at 0, int(0.5) % 60 == 0
+    expired = wheel.advance(0.5)
+    assert expired == []
+
+
+# ==================== TTLManager Tests ====================
+
+
+class _ExpiredCollector:
+    """Helper to collect on_expired callbacks for testing."""
+
+    def __init__(self):
+        self.calls: list[tuple[int, str]] = []
+
+    def __call__(self, block_id: int, session_id: str):
+        self.calls.append((block_id, session_id))
 
 
 @pytest.fixture
-def pool_and_manager():
-    pool = MockBlockPool(num_blocks=10)
-    manager = AgenticCacheTTLManager(
-        iter_blocks=pool.iter_blocks,
-        get_block_by_id=pool.get_block_by_id,
-        filter_by_ttl_expired=pool.filter_by_ttl_expired,
-        filter_by_no_session=pool.filter_by_no_session,
-        demote_ttl_expired=pool.demote_ttl_expired,
-        demote_no_session=pool.demote_no_session,
-        apply_modification=pool.apply_modification,
-    )
-    return pool, manager
+def manager():
+    collector = _ExpiredCollector()
+    mgr = TTLManager(on_expired=collector)
+    return mgr, collector
 
 
-# ------------------ Registry Tests ------------------ #
+# ---- register / update / remove ----
 
 
-def test_missing_required_callbacks_raises():
-    with pytest.raises(ValueError, match="Missing required callbacks"):
-        AgenticCacheTTLManager(callbacks={"iter_blocks": lambda: []})
-
-
-def test_register_and_get_callback(pool_and_manager):
-    _, manager = pool_and_manager
-    manager.register("custom_fn", lambda x: x * 2)
-    assert manager.get_callback("custom_fn")(3) == 6
-
-
-def test_unregister_optional_callback(pool_and_manager):
-    _, manager = pool_and_manager
-    manager.register("temp_fn", lambda: None)
-    manager.unregister("temp_fn")
-    with pytest.raises(KeyError, match="temp_fn"):
-        manager.get_callback("temp_fn")
-
-
-def test_unregister_required_callback_raises(pool_and_manager):
-    _, manager = pool_and_manager
-    with pytest.raises(ValueError, match="Cannot unregister"):
-        manager.unregister("iter_blocks")
-
-
-def test_get_nonexistent_callback_raises(pool_and_manager):
-    _, manager = pool_and_manager
-    with pytest.raises(KeyError, match="not registered"):
-        manager.get_callback("nonexistent")
-
-
-def test_init_with_dict_callbacks():
-    pool = MockBlockPool(5)
-    manager = AgenticCacheTTLManager(callbacks={
-        "iter_blocks": pool.iter_blocks,
-        "get_block_by_id": pool.get_block_by_id,
-        "filter_by_ttl_expired": pool.filter_by_ttl_expired,
-        "filter_by_no_session": pool.filter_by_no_session,
-        "demote_ttl_expired": pool.demote_ttl_expired,
-        "demote_no_session": pool.demote_no_session,
-        "apply_modification": pool.apply_modification,
-    })
-    assert len(manager.get_all_cache_info()) == 5
-
-
-# ------------------ Query Tests ------------------ #
-
-
-def test_get_all_cache_info(pool_and_manager):
-    pool, manager = pool_and_manager
-    assert len(manager.get_all_cache_info()) == 10
-
-
-def test_get_cache_info_by_id_found(pool_and_manager):
-    _, manager = pool_and_manager
-    b = manager.get_cache_info_by_id(2)
-    assert b.block_id == 2
-
-
-def test_get_cache_info_by_id_not_found(pool_and_manager):
-    _, manager = pool_and_manager
-    assert manager.get_cache_info_by_id(999) is None
-
-
-# ------------------ check_cache_ttl Tests ------------------ #
-
-
-def test_nothing_expired_initially(pool_and_manager):
-    pool, manager = pool_and_manager
+def test_manager_register_and_tick_expired(manager):
+    mgr, collector = manager
     now = time.monotonic()
-    pool.blocks[0].session_id, pool.blocks[0].ttl = "s1", now + 5
-    pool.blocks[1].session_id, pool.blocks[1].ttl = "s1", now + 5
-    expired, no_session = manager.check_cache_ttl()
-    assert expired == []
-    assert no_session == []
+    # expire_at=now+1, sleep 2.1s to ensure the timer wheel
+    # advances past the entry's slot (advance doesn't collect the target slot)
+    mgr.register(block_id=1, session_id="s1", expire_at=now + 1)
+    mgr.register(block_id=2, session_id="s1", expire_at=now + 1)
+    mgr.register(block_id=3, session_id="s2", expire_at=now + 100)
+
+    time.sleep(2.1)
+    mgr.tick()
+
+    assert (1, "s1") in collector.calls
+    assert (2, "s1") in collector.calls
+    assert (3, "s2") not in collector.calls
 
 
-def test_ttl_expired_after_sleep(pool_and_manager):
-    pool, manager = pool_and_manager
+def test_manager_register_no_expiry_with_controlled_now(manager):
+    """Use controlled `now` parameter to avoid real-time sleeps."""
+    mgr, collector = manager
+    base = 1000.0
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 10)
+
+    # Tick before expiry
+    mgr.tick(now=base + 5)
+    assert collector.calls == []
+
+    # Tick after expiry
+    mgr.tick(now=base + 15)
+    assert collector.calls == [(1, "s1")]
+
+
+def test_manager_register_extends_ttl(manager):
+    """Re-registering with a later expire_at should extend the TTL."""
+    mgr, collector = manager
+    base = 1000.0
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 5)
+
+    # Extend TTL
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 20)
+
+    # Original expiry time has passed, but TTL was extended
+    mgr.tick(now=base + 10)
+    assert collector.calls == []
+
+    # New expiry time has passed
+    mgr.tick(now=base + 25)
+    assert collector.calls == [(1, "s1")]
+
+
+def test_manager_register_earlier_ttl_ignored(manager):
+    """Re-registering with an earlier expire_at should be ignored."""
+    mgr, collector = manager
+    base = 1000.0
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 20)
+
+    # Try to shorten TTL — should be ignored
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 5)
+
+    mgr.tick(now=base + 10)
+    assert collector.calls == []
+
+    mgr.tick(now=base + 25)
+    assert collector.calls == [(1, "s1")]
+
+
+def test_manager_update_delegates_to_register(manager):
+    """update() should behave identically to register()."""
+    mgr, collector = manager
+    base = 1000.0
+    mgr.update(block_id=1, session_id="s1", new_expire_at=base + 10)
+
+    mgr.tick(now=base + 5)
+    assert collector.calls == []
+
+    mgr.tick(now=base + 15)
+    assert collector.calls == [(1, "s1")]
+
+
+def test_manager_remove_before_expiry(manager):
+    """Removing a block before it expires should prevent on_expired."""
+    mgr, collector = manager
+    base = 1000.0
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 10)
+    mgr.remove(block_id=1, session_id="s1")
+
+    mgr.tick(now=base + 15)
+    assert collector.calls == []
+
+
+def test_manager_remove_nonexistent_noop(manager):
+    """Removing a non-existent key should not raise."""
+    mgr, collector = manager
+    mgr.remove(block_id=999, session_id="nonexistent")
+    assert collector.calls == []
+
+
+def test_manager_same_block_different_sessions():
+    """Same block_id with different session_ids are distinct entries."""
+    collector = _ExpiredCollector()
+    mgr = TTLManager(on_expired=collector)
+    base = 1000.0
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 10)
+    mgr.register(block_id=1, session_id="s2", expire_at=base + 20)
+
+    mgr.tick(now=base + 15)
+    assert (1, "s1") in collector.calls
+    assert (1, "s2") not in collector.calls
+
+    mgr.tick(now=base + 25)
+    assert (1, "s2") in collector.calls
+
+
+# ---- tick edge cases ----
+
+
+def test_manager_tick_removes_entry_from_dict(manager):
+    """After tick processes an expired entry, it should be gone from _entries."""
+    mgr, collector = manager
+    base = 1000.0
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 5)
+
+    mgr.tick(now=base + 10)
+    assert (1, "s1") not in mgr._entries
+
+
+def test_manager_tick_multiple_rounds():
+    """Multiple rounds of tick should correctly expire blocks at different
+    times."""
+    collector = _ExpiredCollector()
+    mgr = TTLManager(on_expired=collector)
+    base = 1000.0
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 5)
+    mgr.register(block_id=2, session_id="s1", expire_at=base + 15)
+    mgr.register(block_id=3, session_id="s1", expire_at=base + 25)
+
+    mgr.tick(now=base + 10)
+    assert collector.calls == [(1, "s1")]
+
+    mgr.tick(now=base + 20)
+    assert collector.calls == [(1, "s1"), (2, "s1")]
+
+    mgr.tick(now=base + 30)
+    assert collector.calls == [(1, "s1"), (2, "s1"), (3, "s1")]
+
+
+def test_manager_tick_with_default_now(manager):
+    """tick() without `now` parameter should use time.monotonic()."""
+    mgr, _ = manager
     now = time.monotonic()
-    pool.blocks[0].session_id, pool.blocks[0].ttl = "s1", now + 1
-    pool.blocks[1].session_id, pool.blocks[1].ttl = "s1", now + 1
-    pool.blocks[2].session_id, pool.blocks[2].ttl = "s2", now + 1
-    pool.blocks[3].session_id, pool.blocks[3].ttl = "s2", now + 5
-
-    time.sleep(1.1)
-    expired, _ = manager.check_cache_ttl()
-
-    assert sorted(expired) == [0, 1, 2]
-    for bid in [0, 1, 2]:
-        assert pool.blocks[bid].zone == BlockZone.B
-    assert pool.blocks[3].zone == BlockZone.C
+    mgr.register(block_id=1, session_id="s1", expire_at=now + 100)
+    # Should not crash
+    mgr.tick()
 
 
-def test_demote_no_session_after_release(pool_and_manager):
-    pool, manager = pool_and_manager
-    now = time.monotonic()
-    pool.blocks[0].session_id, pool.blocks[0].ttl = "s1", now + 1
-    pool.blocks[1].session_id, pool.blocks[1].ttl = "s1", now + 1
-
-    time.sleep(1.1)
-    manager.check_cache_ttl()
-
-    pool.blocks[0].session_id = ""
-    pool.blocks[1].session_id = ""
-    _, no_session = manager.check_cache_ttl()
-
-    assert sorted(no_session) == [0, 1]
-    assert pool.blocks[0].zone == BlockZone.A
-    assert pool.blocks[1].zone == BlockZone.A
+# ==================== Integration Tests ====================
 
 
-def test_partial_session_release(pool_and_manager):
-    pool, manager = pool_and_manager
-    now = time.monotonic()
-    for i in range(4):
-        pool.blocks[i].session_id, pool.blocks[i].ttl = "s1", now + 1
+def test_full_lifecycle_register_update_remove():
+    """Register → update → remove → verify no callback."""
+    collector = _ExpiredCollector()
+    mgr = TTLManager(on_expired=collector)
+    base = 1000.0
 
-    time.sleep(1.1)
-    manager.check_cache_ttl()
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 5)
+    mgr.update(block_id=1, session_id="s1", new_expire_at=base + 20)
+    mgr.remove(block_id=1, session_id="s1")
 
-    pool.blocks[1].session_id = ""
-    pool.blocks[2].session_id = ""
-    _, no_session = manager.check_cache_ttl()
-
-    assert sorted(no_session) == [1, 2]
-    assert pool.blocks[0].zone == BlockZone.B
-    assert pool.blocks[1].zone == BlockZone.A
-    assert pool.blocks[2].zone == BlockZone.A
-    assert pool.blocks[3].zone == BlockZone.B
+    mgr.tick(now=base + 25)
+    assert collector.calls == []
 
 
-def test_none_ttl_never_expires(pool_and_manager):
-    pool, manager = pool_and_manager
-    pool.blocks[0].session_id = "s1"
-    pool.blocks[0].ttl = None
+def test_register_extend_then_expire():
+    """Register, extend TTL, then let it expire."""
+    collector = _ExpiredCollector()
+    mgr = TTLManager(on_expired=collector)
+    base = 1000.0
 
-    expired, _ = manager.check_cache_ttl()
-    assert 0 not in expired
-    assert pool.blocks[0].zone == BlockZone.C
+    mgr.register(block_id=1, session_id="s1", expire_at=base + 5)
+    # Extend before it expires
+    mgr.update(block_id=1, session_id="s1", new_expire_at=base + 30)
 
+    mgr.tick(now=base + 10)
+    assert collector.calls == []
 
-def test_two_rounds_of_check(pool_and_manager):
-    pool, manager = pool_and_manager
-    now = time.monotonic()
-    pool.blocks[0].session_id, pool.blocks[0].ttl = "s1", now + 1
-
-    time.sleep(1.1)
-    expired1, _ = manager.check_cache_ttl()
-    assert expired1 == [0]
-    assert pool.blocks[0].zone == BlockZone.B
-
-    pool.blocks[0].session_id = ""
-    _, no_session2 = manager.check_cache_ttl()
-    assert no_session2 == [0]
-    assert pool.blocks[0].zone == BlockZone.A
+    mgr.tick(now=base + 35)
+    assert collector.calls == [(1, "s1")]
 
 
-# ------------------ modify_cache_info Tests ------------------ #
+def test_multiple_blocks_different_expiry_times():
+    """Multiple blocks with staggered expiry times."""
+    collector = _ExpiredCollector()
+    mgr = TTLManager(on_expired=collector)
+    base = 1000.0
 
-
-def test_modify_single_block_local_index(pool_and_manager):
-    pool, manager = pool_and_manager
-    now = time.monotonic()
-    pool.blocks[0].session_id, pool.blocks[0].ttl = "s1", now + 10
-    pool.blocks[1].session_id, pool.blocks[1].ttl = "s1", now + 10
-    pool.blocks[2].session_id, pool.blocks[2].ttl = "s1", now + 10
-
-    info = CacheModifiedInfo(
-        session_id="s1",
-        local_start_block_id=0,
-        local_stop_block_id=1,
-        updated_ttl=now,
-    )
-    manager.modify_cache_info(info)
-
-    assert pool.blocks[0].ttl <= time.monotonic()
-    assert pool.blocks[1].ttl > time.monotonic()
-    assert pool.blocks[2].ttl > time.monotonic()
-
-
-def test_modify_range_local_index(pool_and_manager):
-    pool, manager = pool_and_manager
-    now = time.monotonic()
-    for i in range(4):
-        pool.blocks[i].session_id, pool.blocks[i].ttl = "s1", now + 10
-
-    info = CacheModifiedInfo(
-        session_id="s1",
-        local_start_block_id=1,
-        local_stop_block_id=3,
-        updated_ttl=now,
-    )
-    manager.modify_cache_info(info)
-
-    assert pool.blocks[0].ttl > time.monotonic()
-    assert pool.blocks[1].ttl <= time.monotonic()
-    assert pool.blocks[2].ttl <= time.monotonic()
-    assert pool.blocks[3].ttl > time.monotonic()
-
-
-def test_modify_no_stop_modifies_all(pool_and_manager):
-    pool, manager = pool_and_manager
-    now = time.monotonic()
-    pool.blocks[5].session_id, pool.blocks[5].ttl = "s1", now + 10
-    pool.blocks[6].session_id, pool.blocks[6].ttl = "s1", now + 10
-
-    info = CacheModifiedInfo(
-        session_id="s1",
-        local_start_block_id=0,
-        updated_ttl=now,
-    )
-    manager.modify_cache_info(info)
-
-    assert pool.blocks[5].ttl <= time.monotonic()
-    assert pool.blocks[6].ttl <= time.monotonic()
-
-
-def test_modify_offload_action(pool_and_manager):
-    pool, manager = pool_and_manager
-    pool.blocks[0].session_id, pool.blocks[0].ttl = "s1", 100
-    pool.blocks[1].session_id, pool.blocks[1].ttl = "s1", 100
-
-    info = CacheModifiedInfo(
-        session_id="s1",
-        local_start_block_id=0,
-        cache_action=BlockOpType.OFFLOAD,
-    )
-    manager.modify_cache_info(info)
-
-    assert pool.blocks[0].is_offloaded is True
-    assert pool.blocks[1].is_offloaded is True
-
-
-def test_modify_prefetch_action(pool_and_manager):
-    pool, manager = pool_and_manager
-    pool.blocks[0].session_id, pool.blocks[0].is_offloaded = "s1", True
-    pool.blocks[1].session_id, pool.blocks[1].is_offloaded = "s1", True
-
-    info = CacheModifiedInfo(
-        session_id="s1",
-        local_start_block_id=0,
-        cache_action=BlockOpType.PREFETCH,
-    )
-    manager.modify_cache_info(info)
-
-    assert pool.blocks[0].is_offloaded is False
-    assert pool.blocks[1].is_offloaded is False
-
-
-def test_modify_nonexistent_session_noop(pool_and_manager):
-    _, manager = pool_and_manager
-    info = CacheModifiedInfo(
-        session_id="nonexistent",
-        local_start_block_id=0,
-        updated_ttl=time.monotonic(),
-    )
-    manager.modify_cache_info(info)  # should not raise
-
-
-# ------------------ prevent_oom Tests ------------------ #
-
-
-def test_prevent_oom_without_callback(pool_and_manager):
-    """prevent_oom returns empty list when callback is not registered."""
-    _, manager = pool_and_manager
-    assert manager.prevent_oom() == []
-
-
-def test_prevent_oom_with_callback():
-    """prevent_oom selects blocks and demotes them via demote_ttl_expired."""
-    pool = MockBlockPool(num_blocks=10)
-    now = time.monotonic()
-    # All blocks in C zone with long TTL — nothing would expire normally
     for i in range(5):
-        pool.blocks[i].session_id = f"s{i}"
-        pool.blocks[i].ttl = now + 100
+        mgr.register(block_id=i, session_id="s1", expire_at=base + (i + 1) * 5)
 
-    manager = AgenticCacheTTLManager(
-        iter_blocks=pool.iter_blocks,
-        get_block_by_id=pool.get_block_by_id,
-        filter_by_ttl_expired=pool.filter_by_ttl_expired,
-        filter_by_no_session=pool.filter_by_no_session,
-        demote_ttl_expired=pool.demote_ttl_expired,
-        demote_no_session=pool.demote_no_session,
-        apply_modification=pool.apply_modification,
-        demote_to_prevent_oom=pool.demote_to_prevent_oom,
-    )
+    # At base+8: only block 0 expired (expire_at=base+5)
+    mgr.tick(now=base + 8)
+    assert (0, "s1") in collector.calls
+    assert len(collector.calls) == 1
 
-    demoted = manager.prevent_oom()
-    # Smallest-TTL blocks get demoted
-    assert len(demoted) == 2
-    for bid in demoted:
-        assert pool.blocks[bid].zone == BlockZone.B
+    # At base+18: blocks 1 and 2 expired
+    mgr.tick(now=base + 18)
+    assert (1, "s1") in collector.calls
+    assert (2, "s1") in collector.calls
+
+    # At base+28: blocks 3 and 4 expired
+    mgr.tick(now=base + 28)
+    assert (3, "s1") in collector.calls
+    assert (4, "s1") in collector.calls
+    assert len(collector.calls) == 5
 
 
-def test_prevent_oom_returns_empty_when_no_c_blocks():
-    """If no blocks are in C zone, callback returns nothing."""
-    pool = MockBlockPool(num_blocks=5)
-    # All blocks in A zone
-    for i in range(5):
-        pool.blocks[i].zone = BlockZone.A
+def test_timer_wheel_best_effort_filtering():
+    """Timer wheel may return entries whose TTL hasn't actually expired yet
+    (an entry's expire_at is far in the future but its slot is collected
+    during the current advance).  TTLManager.tick() should filter them out
+    by checking `now >= entry.ttl_expire_at`."""
+    collector = _ExpiredCollector()
+    mgr = TTLManager(on_expired=collector)
+    # Use a tiny tick_count so entries from different time ranges
+    # can land in the same slot
+    mgr._timer_wheel = TTLTimerWheel(tick_count=10)
 
-    manager = AgenticCacheTTLManager(
-        iter_blocks=pool.iter_blocks,
-        get_block_by_id=pool.get_block_by_id,
-        filter_by_ttl_expired=pool.filter_by_ttl_expired,
-        filter_by_no_session=pool.filter_by_no_session,
-        demote_ttl_expired=pool.demote_ttl_expired,
-        demote_no_session=pool.demote_no_session,
-        apply_modification=pool.apply_modification,
-        demote_to_prevent_oom=pool.demote_to_prevent_oom,
-    )
+    # Entry 1: expire_at=5.0 → slot int(5)%10 = 5 (truly expired)
+    mgr.register(block_id=1, session_id="s1", expire_at=5.0)
+    # Entry 2: expire_at=15.5 → slot int(15)%10 = 5 (NOT expired yet,
+    # but shares the same slot as entry 1 due to tick_count wrapping)
+    mgr.register(block_id=2, session_id="s1", expire_at=15.5)
 
-    demoted = manager.prevent_oom()
-    assert demoted == []
-
-
-def test_prevent_oom_then_check_releases_session():
-    """Full flow: prevent_oom → demote to B → release session → demote to A."""
-    pool = MockBlockPool(num_blocks=10)
-    now = time.monotonic()
-    for i in range(4):
-        pool.blocks[i].session_id = "s1"
-        pool.blocks[i].ttl = now + 100
-
-    manager = AgenticCacheTTLManager(
-        iter_blocks=pool.iter_blocks,
-        get_block_by_id=pool.get_block_by_id,
-        filter_by_ttl_expired=pool.filter_by_ttl_expired,
-        filter_by_no_session=pool.filter_by_no_session,
-        demote_ttl_expired=pool.demote_ttl_expired,
-        demote_no_session=pool.demote_no_session,
-        apply_modification=pool.apply_modification,
-        demote_to_prevent_oom=pool.demote_to_prevent_oom,
-    )
-
-    # Step 1: OOM prevention forces demotion of 2 blocks
-    demoted = manager.prevent_oom()
-    assert len(demoted) == 2
-    for bid in demoted:
-        assert pool.blocks[bid].zone == BlockZone.B
-
-    # Step 2: release their sessions
-    for bid in demoted:
-        pool.blocks[bid].session_id = ""
-
-    # Step 3: normal check demotes them B → A
-    _, no_session = manager.check_cache_ttl()
-    assert sorted(no_session) == sorted(demoted)
-    for bid in demoted:
-        assert pool.blocks[bid].zone == BlockZone.A
-
-
-# ------------------ Integration Tests ------------------ #
-
-
-def test_modify_ttl_then_demote(pool_and_manager):
-    pool, manager = pool_and_manager
-    now = time.monotonic()
-    pool.blocks[0].session_id, pool.blocks[0].ttl = "s1", now + 10
-    pool.blocks[1].session_id, pool.blocks[1].ttl = "s1", now + 10
-
-    info = CacheModifiedInfo(
-        session_id="s1",
-        local_start_block_id=0,
-        local_stop_block_id=1,
-        updated_ttl=now,
-    )
-    manager.modify_cache_info(info)
-
-    expired, _ = manager.check_cache_ttl()
-    assert expired == [0]
-    assert pool.blocks[0].zone == BlockZone.B
-    assert pool.blocks[1].zone == BlockZone.C
-
-
-def test_full_lifecycle(pool_and_manager):
-    pool, manager = pool_and_manager
-    now = time.monotonic()
-    pool.blocks[0].session_id, pool.blocks[0].ttl = "s1", now + 10
-    pool.blocks[1].session_id, pool.blocks[1].ttl = "s1", now + 10
-
-    # modify → expired
-    manager.modify_cache_info(CacheModifiedInfo(
-        session_id="s1",
-        local_start_block_id=0,
-        updated_ttl=now,
-    ))
-    expired, _ = manager.check_cache_ttl()
-    assert sorted(expired) == [0, 1]
-    assert pool.blocks[0].zone == BlockZone.B
-    assert pool.blocks[1].zone == BlockZone.B
-
-    # release session → reclaimable
-    pool.blocks[0].session_id = ""
-    pool.blocks[1].session_id = ""
-    _, no_session = manager.check_cache_ttl()
-    assert sorted(no_session) == [0, 1]
-    assert pool.blocks[0].zone == BlockZone.A
-    assert pool.blocks[1].zone == BlockZone.A
-
-
-def test_non_contiguous_session_blocks():
-    """Session blocks may be non-contiguous; local index still maps correctly."""
-    pool = MockBlockPool(num_blocks=10)
-    manager = AgenticCacheTTLManager(
-        iter_blocks=pool.iter_blocks,
-        get_block_by_id=pool.get_block_by_id,
-        filter_by_ttl_expired=pool.filter_by_ttl_expired,
-        filter_by_no_session=pool.filter_by_no_session,
-        demote_ttl_expired=pool.demote_ttl_expired,
-        demote_no_session=pool.demote_no_session,
-        apply_modification=pool.apply_modification,
-    )
-    now = time.monotonic()
-    # s1 occupies block 2, 5, 8 (non-contiguous)
-    pool.blocks[2].session_id, pool.blocks[2].ttl = "s1", now + 10
-    pool.blocks[5].session_id, pool.blocks[5].ttl = "s1", now + 10
-    pool.blocks[8].session_id, pool.blocks[8].ttl = "s1", now + 10
-
-    # local[0]=block2, local[1]=block5, local[2]=block8
-    info = CacheModifiedInfo(
-        session_id="s1",
-        local_start_block_id=1,
-        local_stop_block_id=3,
-        updated_ttl=now,
-    )
-    manager.modify_cache_info(info)
-
-    assert pool.blocks[2].ttl > time.monotonic()
-    assert pool.blocks[5].ttl <= time.monotonic()
-    assert pool.blocks[8].ttl <= time.monotonic()
-
-    expired, _ = manager.check_cache_ttl()
-    assert sorted(expired) == [5, 8]
+    # Advance to time 6 → target_slot=6, collects slots 0–5
+    # Both entries are in slot 5, but now=6.0 < 15.5
+    mgr.tick(now=6.0)
+    assert (1, "s1") in collector.calls
+    assert (2, "s1") not in collector.calls

@@ -1,6 +1,7 @@
 from typing import Optional, Callable, Any
 from enum import Enum
 from dataclasses import dataclass
+import time
 
 try:
     from vllm.logger import init_logger
@@ -10,238 +11,225 @@ except ImportError:
     logger = logging.getLogger(__name__)
 
 
-class BlockOpType(str, Enum):
-    OFFLOAD = "offload"
-    PREFETCH = "prefetch"
-    EVICT = "evict"
-
-
 @dataclass
-class CacheModifiedInfo:
+class TTLBlockEntry:
+    block_id: int
     session_id: str
-    local_start_block_id: Optional[int] = 0
-    local_stop_block_id: Optional[int] = None
-    updated_ttl: Optional[int] = None
-    cache_action: Optional[BlockOpType] = None
+    ttl_expire_at: float
 
 
-class AgenticCacheTTLManager():
-    """Generic TTL manager that delegates all data-access and state-transition
-    logic to a callable registry.  The manager itself only makes *decisions*
-    (which blocks need attention); registered callbacks carry out the actual
-    data-structure changes.
+class TTLTimerWheel:
+    """Best-effort timer wheel for TTL-protected free KV cache blocks.
 
-    Manager 不感知具体的区域划分（A/B/C 等），只通过两个回调表达
-    语义上的"降级"操作：
-      - demote_ttl_expired : TTL 过期的 block 需要降级
-      - demote_no_session  : 没有 session 的 block 需要降级
-
-    Built-in callback names
-    -----------------------
-    self_check_ttl -> None
-        filter the blocks with ttl overtime and demote them to the corresponding zone
-
-    Optional callbacks
-    ------------------
-    demote_to_prevent_oom  () -> list[int]
-        Select block IDs to demote for OOM prevention (e.g. when all blocks
-        are in active zone and none can be reclaimed through normal TTL
-        or session checks).  The manager will pass the returned IDs to
-        demote_ttl_expired.
-    iter_blocks            () -> Iterable[Any]
-        Iterate over all managed blocks.
-    get_block_by_id        (block_id: int) -> Any | None
-        Retrieve a single block by its ID.
-    filter_by_ttl_expired  () -> list[int]
-        Return block IDs whose TTL deadline <= time.monotonic().
-    filter_by_no_session   () -> list[int]
-        Return block IDs that have no session bound.
-    demote_ttl_expired     (block_ids: list[int]) -> None
-        Carry out the state transition for TTL-expired blocks.
-    demote_no_session      (block_ids: list[int]) -> None
-        Carry out the state transition for session-free blocks.
-    apply_modification     (info: CacheModifiedInfo) -> None
-        Apply a modification described by *info* to the corresponding block(s).
-        *local_start_block_id* / *local_stop_block_id* are **local indices**
-        within the session's block list (0-based, ordered by block_id), NOT
-        global block IDs.  The callback maps local indices to actual blocks.
-        When *local_stop_block_id* is None, the callback should apply to
-        all blocks from *start* to the session's last block.
+    This class does not mutate the free-block queue. It only tracks when a
+    block may become eligible for promotion out of zone C. Callers should
+    validate that returned blocks are still in the free queue, then call
+    FreeKVCacheBlockQueue.promote_to_zone_a/b() as appropriate.
     """
 
-    # _REQUIRED_CALLBACKS: list[str] = [
-    #     "iter_blocks",
-    #     "get_block_by_id",
-    #     "filter_by_ttl_expired",
-    #     "filter_by_no_session",
-    #     "demote_ttl_expired",
-    #     "demote_no_session",
-    #     "apply_modification",
-    # ]
+    def __init__(self, tick_count: int = 60):
+        """Initialize the timer wheel.
 
-    _REQUIRED_CALLBACKS: list[str] = [
-        "self_check_ttl"
-    ]
+        Parameters
+        ----------
+        tick_count : int
+            Number of slots in the wheel. Each slot corresponds to one
+            time unit (second). A block whose TTL expires at time T is
+            placed in slot ``int(T) % tick_count``. The wheel wraps
+            around, so tick_count also determines the maximum TTL
+            range that can be uniquely tracked.
+        """
+        self.slots: list[list[TTLBlockEntry]] = [[] for _ in range(tick_count)]
+        self.current_slot = 0
+        self.tick_count = tick_count
 
-    def __init__(
-        self,
-        callbacks: Optional[dict[str, Callable[..., Any]]] = None,
-        **kw_callbacks: Callable[..., Any],
-    ):
+        logger.info(
+            f"Initialized TTLTimerWheel with {tick_count} slots."
+        )
+
+    def insert(self, block: TTLBlockEntry, expire_at: float) -> None:
+        """Insert a block into the wheel at the slot corresponding to
+        its expiration time.
+
+        Parameters
+        ----------
+        block : TTLBlockEntry
+            The block entry to track.
+        expire_at : float
+            Absolute timestamp (e.g. time.monotonic()) at which the
+            block's TTL expires. The block is placed in slot
+            ``int(expire_at) % tick_count``.
+        """
+        tick_index = int(expire_at) % self.tick_count
+        self.slots[tick_index].append(block)
+
+        logger.info(
+            f"Inserting block {block.block_id} into TTLTimerWheel, "
+            f"block.session_id={block.session_id},"
+            f"block.ttl_expire_at={block.ttl_expire_at:.2f}, "
+        )
+
+    def remove(self, block: TTLBlockEntry) -> None:
+        """Remove a block from the wheel.
+
+        Uses the block's ``ttl_expire_at`` to locate its slot.
+        If the block has already been collected by ``advance()``
+        (i.e. its TTL already expired), it won't be found in the
+        wheel and a warning is logged instead of raising an error.
+
+        Parameters
+        ----------
+        block : TTLBlockEntry
+            The block entry to remove. Must be the same object that
+            was passed to ``insert()`` (uses list.remove identity
+            check).
+        """
+        tick_index = int(block.ttl_expire_at) % self.tick_count
+        slot = self.slots[tick_index]
+        try:
+            slot.remove(block)
+        except ValueError:
+            logger.warning(
+                "Block %d not found in slot %d (expire_at=%.2f), "
+                "may have already expired.",
+                block.block_id, tick_index, block.ttl_expire_at,
+            )
+            return
+
+        logger.info(
+            "Removed block %d from TTLTimerWheel slot %d, "
+            "session_id=%s, expire_at=%.2f.",
+            block.block_id, tick_index,
+            block.session_id, block.ttl_expire_at,
+        )
+
+    def advance(self, now: float) -> list[TTLBlockEntry]:
+        """Advance the wheel to the current time and return all blocks
+        whose TTL has expired.
+
+        Moves ``current_slot`` forward to ``int(now) % tick_count``,
+        collecting and clearing every slot along the way. The returned
+        blocks are those whose TTL deadline falls in the time range
+        between the previous position and the current time.
+
+        Important: this method only **identifies** expired blocks; it
+        does not mutate the free-block queue or change block zones.
+        Callers should validate that returned blocks are still in the
+        free queue, then apply the appropriate zone transition.
+
+        Parameters
+        ----------
+        now : float
+            Current time, typically ``time.monotonic()``.
+
+        Returns
+        -------
+        list[TTLBlockEntry]
+            All blocks that expired between the previous wheel
+            position and ``now``.
+        """
+        expired = []
+        target_slot = int(now) % self.tick_count
+        while self.current_slot != target_slot:
+            expired.extend(self.slots[self.current_slot])
+            self.slots[self.current_slot].clear()
+            self.current_slot = (self.current_slot + 1) % self.tick_count
+
+        logger.info(
+            f"Advancing TTLTimerWheel to time {now:.2f}, "
+            f"(current_slot={self.current_slot})."
+            f" Expired blocks: {[block.block_id for block in expired]}."
+        )
+
+        return expired
+
+class TTLManager:
+    """Block 级 TTL 管理器.
+
+    使用 ``(block_id, session_id)`` 作为键跟踪每个 block 的 TTL，
+    内部维护一个 TTLTimerWheel 用于高效发现过期 entry。当 entry
+    过期时调用初始化时传入的 ``on_expired`` 回调通知调用方。
+    """
+
+    def __init__(self, on_expired: Callable[[int, str], None]):
         """
         Parameters
         ----------
-        callbacks : dict[str, Callable], optional
-            A mapping of ``{name: fn}`` to register in bulk.
-        **kw_callbacks
-            Same as *callbacks* but passed as keyword arguments.
-
-        Both sources are merged; keyword arguments take precedence
-        when a name appears in both.
+        on_expired : Callable[[int, str], None]
+            Block 过期时的回调，签名为 ``on_expired(block_id, session_id)``。
+            调用方在此回调里执行实际的 zone 转换 / 资源回收。
         """
-        self._registry: dict[str, Callable[..., Any]] = {}
+        self._on_expired = on_expired #TODO：SAM传入对应回调函数
+        self._entries: dict[tuple[int, str], TTLBlockEntry] = {}
+        self._timer_wheel = TTLTimerWheel(tick_count=3600)
 
-        if callbacks:
-            self._registry.update(callbacks)
-        if kw_callbacks:
-            self._registry.update(kw_callbacks)
+        logger.info("TTLManager initialized with on_expired=%s",
+                    getattr(on_expired, "__name__", repr(on_expired)))
 
-        missing = [
-            name for name in self._REQUIRED_CALLBACKS
-            if name not in self._registry
-        ]
-        if missing:
-            raise ValueError(
-                f"Missing required callbacks: {missing}. "
-                f"Provide them via `callbacks` dict or keyword arguments."
-            )
+    def register(self, block_id: int, session_id: str,
+                 expire_at: float) -> None:
+        """注册或更新一个 block 的 TTL。
 
-        logger.info("AgenticCacheTTLManager initialized with "
-                     "callbacks: %s", list(self._registry))
-
-    # ------------------------------------------------------------------
-    #  Registry management
-    # ------------------------------------------------------------------
-
-    def register(self, name: str, fn: Callable[..., Any]) -> None:
-        """Register (or overwrite) a callback by *name*."""
-        self._registry[name] = fn
-        logger.debug("Registered callback: %s", name)
-
-    def unregister(self, name: str) -> None:
-        """Remove a callback.  Built-in required names cannot be removed."""
-        if name in self._REQUIRED_CALLBACKS:
-            raise ValueError(
-                f"Cannot unregister required callback '{name}'."
-            )
-        self._registry.pop(name, None)
-        logger.debug("Unregistered callback: %s", name)
-
-    def get_callback(self, name: str) -> Callable[..., Any]:
-        """Retrieve a registered callback by *name*."""
-        if name not in self._registry:
-            raise KeyError(
-                f"Callback '{name}' is not registered. "
-                f"Available: {list(self._registry)}"
-            )
-        return self._registry[name]
-
-    # ------------------------------------------------------------------
-    #  Public API
-    # ------------------------------------------------------------------
-
-    def get_all_cache_info(self):
-        """Return information for every managed block."""
-        fn = self._registry.get("iter_blocks")
-        if fn is None:
-            logger.info(f"callback 'iter_blocks' is not available in ttl manager")
-            return
-        return list(self._registry["iter_blocks"]())
-
-    def get_cache_info_by_id(self, block_id: int):
-        """Return information for a single block identified by *block_id*."""
-        fn = self._registry.get("get_block_by_id")
-        if fn is None:
-            logger.info(f"callback 'get_block_by_id' is not available in ttl manager")
-            return
-        return self._registry["get_block_by_id"](block_id)
-
-    def check_cache_ttl(self):
-        """Check TTL status and execute demotion via registered callbacks.
-
-        Decision logic:
-          1. filter_by_ttl_expired → 找出 TTL 过期的 block
-             → demote_ttl_expired  执行降级
-          2. filter_by_no_session  → 找出无 session 的 block
-             → demote_no_session   执行降级
-
-        Manager 不感知具体区域，降级语义由注册方定义。
-
-        Returns
-        -------
-        (expired_ids, no_session_ids) : tuple[list[int], list[int]]
-            IDs of blocks processed in each step.
+        如果 ``(block_id, session_id)`` 已存在：
+          - 当新的 ``expire_at`` 比旧的更晚时，先从 timer wheel 移除旧
+            entry，更新 expire_at 后重新插入；
+          - 否则忽略（保留更晚的过期时间）。
+        如果不存在：创建新的 TTLBlockEntry 并插入 timer wheel。
         """
-        fn = self._registry.get("self_check_ttl")
-        if fn is None:
-            logger.warning(f"callback 'self_check_ttl' is not available in ttl manager")
-            return
-        self._registry["self_check_ttl"]()
-
-
-
-    def prevent_oom(self):
-        """Force-demote blocks to prevent OOM.
-
-        Called when normal TTL / session checks cannot free enough blocks
-        (e.g. all blocks are in active zone).  If the optional callback
-        ``demote_to_prevent_oom`` is registered, it selects block IDs;
-        the manager then passes them to ``demote_ttl_expired``.
-
-        Returns
-        -------
-        demoted_ids : list[int]
-            IDs of blocks that were demoted, or empty list if the
-            callback is not registered or returned nothing.
-        """
-        fn = self._registry.get("demote_to_prevent_oom")
-        if fn is None:
-            logger.info("demote_to_prevent_oom not registered, skipping")
-            return []
-        demoted_ids: list[int] = fn()
-        if demoted_ids:
-            logger.warning("OOM prevention: force-demoting blocks %s",
-                           demoted_ids)
-            self._registry["demote_ttl_expired"](demoted_ids)
+        key = (block_id, session_id)
+        if key in self._entries:
+            old_entry = self._entries[key]
+            if expire_at > old_entry.ttl_expire_at:
+                self._timer_wheel.remove(old_entry)
+                old_entry.ttl_expire_at = expire_at
+                self._timer_wheel.insert(old_entry, expire_at)
         else:
-            logger.debug("OOM prevention: no blocks selected")
-        return demoted_ids
+            entry = TTLBlockEntry(
+                block_id=block_id,
+                session_id=session_id,
+                ttl_expire_at=expire_at,
+            )
+            self._entries[key] = entry
+            self._timer_wheel.insert(entry, expire_at)
+        logger.info(f"Register block_id {block_id} and session id {session_id} with ttl {expire_at} in TTL Manager")
 
-    def run(self):
+    def update(self, block_id: int, session_id: str,
+               new_expire_at: float) -> None:
+        """更新 block 的 TTL，语义等同于 ``register``。"""
+        self.register(block_id, session_id, new_expire_at)
+
+    def remove(self, block_id: int, session_id: str) -> None:
+        """显式移除一个 block 的 TTL 跟踪。
+
+        同时从 ``_entries`` 和 timer wheel 中删除。如果不存在则静默忽略。
         """
-        Main function to run ttl-manager. Required to check ttl and optional to prevent OOM
+        #TODO: 联调时确保，对于某个block_id的不同操作，记录的key值是一致的
+        key = (block_id, session_id)
+        if key in self._entries:
+            entry = self._entries.pop(key)
+            self._timer_wheel.remove(entry)
+        else:
+            logger.info(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
+
+    def tick(self, now: float | None = None) -> None:
+        """推进 timer wheel，处理所有已过期的 entry。
+
+        对每个由 timer wheel 收集到的过期 entry，先校验 ``now >= expire_at``
+        （timer wheel 是 best-effort，slot 里可能含尚未真正过期的 entry），
+        然后从 ``_entries`` 移除并调用 ``on_expired`` 回调。
+
+        Parameters
+        ----------
+        now : float, optional
+            当前时间戳，默认 ``time.monotonic()``。
         """
-        self.check_cache_ttl()
-        #self.prevent_oom()
+        now = now if now is not None else time.monotonic()
+        expired_entries = self._timer_wheel.advance(now)
+        for entry in expired_entries:
+            if now >= entry.ttl_expire_at:
+                self._entries.pop(
+                    (entry.block_id, entry.session_id), None)
+                self._on_expired(entry.block_id, entry.session_id)
 
-    def modify_cache_info(self, cache_todo_info: CacheModifiedInfo):
-        """Apply the modification described in *cache_todo_info*.
-
-        Manager 只负责调用，具体 local→global 映射和遍历逻辑由注册的
-        apply_modification 回调处理。local_start/stop 是 session 内的
-        local index，与全局 block_id 无关。
-        """
-        logger.info("modify_cache_info: session=%s, local_start=%s, "
-                     "local_stop=%s, action=%s",
-                     cache_todo_info.session_id,
-                     cache_todo_info.local_start_block_id,
-                     cache_todo_info.local_stop_block_id,
-                     cache_todo_info.cache_action)
-
-        fn = self._registry.get("apply_modification")
-        if fn is None:
-            logger.info(f"callback 'apply_modification' is not available in ttl manager")
-            return
-
-        self._registry["apply_modification"](cache_todo_info)
-
+def example_expired_callback(block_id: int, session_id: str) -> None:
+    logger.info(f"block_id {block_id} and session_id {session_id} is processing on TTL expiration")

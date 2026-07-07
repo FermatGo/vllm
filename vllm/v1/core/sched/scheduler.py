@@ -39,7 +39,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
-from vllm.v1.core.agentic_cache_ttl_manager import AgenticCacheTTLManager
+from vllm.v1.core.agentic_cache_ttl_manager import TTLManager, example_expired_callback
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -246,8 +246,8 @@ class Scheduler(SchedulerInterface):
         ):
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
-        self.ttl_manager = AgenticCacheTTLManager(
-            self_check_ttl=self.kv_cache_manager.block_pool.advance_ttl_timer,
+        self.ttl_manager = TTLManager(
+            on_expired=example_expired_callback,
         )
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -406,8 +406,9 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+        #TODO: move to SAM and call SAM.ttl_manager in schedule()
         logger.info("start to check cache ttl in scheduler")
-        self.ttl_manager.check_cache_ttl()
+        self.ttl_manager.tick()
         logger.info("finish to check cache ttl in scheduler")
 
         while req_index < len(self.running) and token_budget > 0:
