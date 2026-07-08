@@ -81,11 +81,11 @@ class EngineCoreReadyResponse:
 @dataclass
 class ContextManagementEditsParams: # 上下文编辑
     type: Literal["offload","prefetch","evict"] = "offload"
-    start: int | None = None
-    end: int | None = None
-    target: Literal["messages", "tools"] = "messages"
-    block_start: int | None = None
-    block_end: int | None = None
+    start: int | None = None  # 起始 message index（pymotor 侧语义）
+    end: int | None = None  # 结束 message index（pymotor 侧语义）
+    target: Literal["session", "messages", "tools"] = "messages"
+    block_start: int | None = None  # pymotor 转换的起始 block index
+    block_end: int | None = None  # pymotor 转换的结束 block index
 
 
 @dataclass
