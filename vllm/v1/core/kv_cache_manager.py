@@ -159,6 +159,9 @@ class KVCacheManager:
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
 
+        self._on_blocks_allocated = None
+        self._on_block_cache_hit = None
+
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -208,7 +211,7 @@ class KVCacheManager:
         max_cache_hit_length = request.num_tokens - 1
         computed_blocks, num_new_computed_tokens = (
             self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length, request.session_id
+                request.block_hashes, max_cache_hit_length
             )
         )
 
@@ -220,7 +223,11 @@ class KVCacheManager:
                 preempted=request.num_preemptions > 0,
             )
 
-        return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
+        kv_cache_blocks = self.create_kv_cache_blocks(computed_blocks)
+        if num_new_computed_tokens > 0 and self._on_block_cache_hit is not None:
+            self._on_block_cache_hit(request, kv_cache_blocks)
+
+        return kv_cache_blocks, num_new_computed_tokens
 
     def can_fit_full_sequence(
         self,
@@ -352,18 +359,6 @@ class KVCacheManager:
                 "external computed tokens"
             )
 
-        self.coordinator.register_session(
-            session_id=request.session_id,
-            parent_session_id=request.parent_session_id,
-        )
-
-        # When this request first participates in the KV allocation, 
-        # record the ttl.
-        self.coordinator.record_request_ttl(
-            request_id=request.request_id,
-            ttl=request.ttl,
-        )
-
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
         else:
@@ -419,7 +414,6 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
-                session_id=request.session_id,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
@@ -427,13 +421,18 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
-            session_id=request.session_id,
         )
+
+        new_kv_cache_blocks = self.create_kv_cache_blocks(new_blocks)
+
+        if (self._on_blocks_allocated is not None and 
+            new_kv_cache_blocks is not self.empty_kv_cache_blocks):
+            self._on_blocks_allocated(request, new_kv_cache_blocks)
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return self.create_kv_cache_blocks(new_blocks)
+            return new_kv_cache_blocks
 
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
         # + num_external_computed_tokens + num_new_tokens, but must exclude
@@ -446,7 +445,7 @@ class KVCacheManager:
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
-        return self.create_kv_cache_blocks(new_blocks)
+        return new_kv_cache_blocks
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -572,9 +571,28 @@ class KVCacheManager:
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
         self.coordinator.new_step_starts()
-
-    def free_session(self, session_id: str) -> dict:
-        return self.coordinator.free_session(session_id)
     
-    def free_session_tree(self, session_id: str) -> dict:
-        return self.coordinator.free_session_tree(session_id)
+    def update_block_meta(
+        self,
+        block_id: int,
+        delta_ref: int = 0,
+        ttl_expire_at: float | None = None,
+    ) -> None:
+        """统一修改 block 的 metadata。
+        SAM 的所有事件都转化为对此接口的调用。
+        """
+        block = self.block_pool.blocks[block_id]
+        if ttl_expire_at is not None:
+            block._ttl_expire_at = ttl_expire_at
+        if delta_ref != 0:
+            block._session_ref_cnt += delta_ref
+        if block.ref_cnt == 0 and not block.is_null:
+            self.block_pool.free_block_queue.on_block_meta_changed(block)
+    
+    def set_session_event_callbacks(
+        self,
+        on_blocks_allocated=None,
+        on_block_cache_hit=None,
+    ) -> None:
+        self._on_blocks_allocated = on_blocks_allocated
+        self._on_block_cache_hit = on_block_cache_hit

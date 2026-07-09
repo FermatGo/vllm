@@ -61,11 +61,7 @@ class BlockHashToBlockMap:
             BlockHashWithGroupId, KVCacheBlock | dict[int, KVCacheBlock]
         ] = {}
 
-    def get_one_block(
-        self, 
-        key: BlockHashWithGroupId, 
-        session_id: str | None = None,
-    ) -> KVCacheBlock | None:
+    def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
         """
         Gets any block with the given block hash key.
         """
@@ -74,15 +70,8 @@ class BlockHashToBlockMap:
             if isinstance(blocks, KVCacheBlock):
                 return blocks
             if isinstance(blocks, dict):
-                if session_id is not None:
-                    # 优先返回同session的block
-                    for block in blocks.values():
-                        if session_id in block.session_ref:
-                            return block
-                # 没有session匹配或没有session_id，返回第一个可用block
-                # 优先返回session_ref为空的block（减少session关联污染）
                 for block in blocks.values():
-                    if not block.session_ref:
+                    if block._session_ref_cnt > 0:
                         return block
                 return next(iter(blocks.values()))
             self._unexpected_blocks_type(blocks)
@@ -199,17 +188,8 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
-        # session_id -> set[block_id], Used to quickly find all the blocks of a session
-        self.session_to_blocks: dict[str, set[int]] = {}
-
-        self._session_parent: dict[str, str | None] = {}
-        self._session_children: dict[str, set[str]] = {}
-
     def get_cached_block(
-        self, 
-        block_hash: BlockHash, 
-        kv_cache_group_ids: list[int],
-        session_id: str | None = None,
+        self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
         """Get the cached block by the block hash for each group in
         `kv_cache_group_ids`, or None if cache miss for any group.
@@ -218,7 +198,7 @@ class BlockPool:
         Args:
             block_hash: The hash value of the block.
             kv_cache_group_ids: The ids of the KV cache groups.
-            session_id: The id of the session to which the blocks belong.
+        
         Returns:
             The cached blocks if exists, or None.
         """
@@ -228,7 +208,7 @@ class BlockPool:
                 block_hash, group_id
             )
             block = self.cached_block_hash_to_block.get_one_block(
-                block_hash_with_group_id, session_id
+                block_hash_with_group_id
             )
             if not block:
                 return None
@@ -346,18 +326,13 @@ class BlockPool:
                 )
             )
 
-    def get_new_blocks(
-        self, 
-        num_blocks: int, 
-        session_id: str | None = None,
-    ) -> list[KVCacheBlock]:
+    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
-            session_id: The ID of the session to which the blocks belong.
 
         Returns:
             A list of new block.
@@ -371,19 +346,16 @@ class BlockPool:
         if self.enable_caching:
             for block in ret:
                 self._maybe_evict_cached_block(block)
-                # 清理前一个session的关联和TTL
-                self._clear_block_session_refs(block)
-                block._ttl_expire_at = 0.0  # 清除TTL
+                block._session_ref_cnt = 0
+                block._ttl_expire_at = 0.0
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
-                # 设置新session引用
-                if session_id is not None:
-                    block._session_ref.add(session_id)
-                    self._record_block_session(block.block_id, session_id)
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         else:
             for block in ret:
+                block._session_ref_cnt = 0
+                block._ttl_expire_at = 0.0
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
@@ -427,18 +399,13 @@ class BlockPool:
             )
         return True
 
-    def touch(
-        self, 
-        blocks: Sequence[KVCacheBlock], 
-        session_id: str | None = None,
-    ) -> None:
+    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
 
         Args:
             blocks: A list of blocks to touch.
-            session_id: The ID of the session to which the blocks belong.
         """
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
@@ -446,45 +413,24 @@ class BlockPool:
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
-            if session_id is not None:
-                # 记录session引用(幂等：同一session只记录一次)
-                if session_id not in block._session_ref:
-                    block._session_ref.add(session_id)
-                    self._record_block_session(block.block_id, session_id)
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
-    def free_blocks(
-        self, 
-        ordered_blocks: Iterable[KVCacheBlock], 
-        ttl: float | None = None,
-    ) -> None:
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
-            ttl: The time-to-live for the blocks being freed.
         """
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
-        now = time.monotonic() if ttl else 0
         for block in blocks_list:
             block.ref_cnt -= 1
-        
-        free_blocks = []
-        for block in blocks_list:
-            if block.ref_cnt == 0 and not block.is_null:
-                # 设置 TTL 过期时间
-                if ttl and ttl > 0:
-                    new_expire = now + ttl
-                    # TTL 刷新：以最晚的为准
-                    block._ttl_expire_at = max(block._ttl_expire_at, new_expire)
-                    self.ttl_timer_wheel.insert(block, block._ttl_expire_at)
-                free_blocks.append(block)
-
-        self.free_block_queue.append_n(free_blocks)
+        self.free_block_queue.append_n(
+            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
+        )
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -572,142 +518,7 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
-
-    def register_session(
-        self,
-        session_id: str,
-        parent_session_id: str | None = None,
-    ) -> None:
-        """注册session及其层级关系(幂等操作)"""
-        if session_id in self._session_parent:
-            return
-        self._session_parent[session_id] = parent_session_id
-        if parent_session_id is not None:
-            if parent_session_id not in self._session_children:
-                self._session_children[parent_session_id] = set()
-            self._session_children[parent_session_id].add(session_id)
-
-        logger.info(
-            f"Registered session {session_id} with, "
-            f"parent {parent_session_id}, "
-            f"children {self._session_children.get(session_id)}"
-        )
     
-    def _record_block_session(self, block_id: int, session_id: str):
-        """记录block属于哪个session(幂等操作)"""
-        if session_id not in self.session_to_blocks:
-            self.session_to_blocks[session_id] = set()
-        self.session_to_blocks[session_id].add(block_id)
-
-        logger.info(
-            f"Recorded block {block_id} for session {session_id}. "
-            f"block._session_ref: {self.blocks[block_id]._session_ref}. "
-            f"block.ref_cnt: {self.blocks[block_id].ref_cnt}. "
-            f"block._ttl_expire_at: {self.blocks[block_id]._ttl_expire_at}. "
-            f"Current blocks for session: {self.session_to_blocks[session_id]}"
-        )
-
-    def _remove_block_session(self, block_id: int, session_id: str):
-        """移除block的session记录"""
-        if session_id in self.session_to_blocks:
-            self.session_to_blocks[session_id].discard(block_id)
-            if not self.session_to_blocks[session_id]:
-                del self.session_to_blocks[session_id]
-        
-        logger.info(
-            f"Removed block {block_id} from session {session_id}. "
-            f"block._session_ref: {self.blocks[block_id]._session_ref}. "
-            f"block.ref_cnt: {self.blocks[block_id].ref_cnt}. "
-            f"block._ttl_expire_at: {self.blocks[block_id]._ttl_expire_at}. "
-        )
-    
-    def get_session_blocks(self, session_id: str) -> set[int]:
-        """Obtain all the block IDs of the session"""
-        blocks = self.session_to_blocks.get(session_id)
-        return blocks.copy() if blocks is not None else set()
-    
-    def _clear_block_session_refs(self, block: KVCacheBlock) -> None:
-        """清理block的session引用"""
-        for session_id in list(block._session_ref):
-            self._remove_block_session(block.block_id, session_id)
-        block._session_ref.clear()
-
-        logger.info(
-            f"Cleared session references for block {block.block_id}. "
-            f"Current session references: {block._session_ref}"
-            f"block.ref_cnt: {block.ref_cnt}. "
-            f"block._ttl_expire_at: {block._ttl_expire_at}. "
-        )
-    
-    def free_session(self, session_id: str) -> dict:
-        """按 session 清理 KV cache block。
-
-        清理策略：
-        1. 遍历该session的所有block (通过session_to_blocks映射)
-        2. 对每个block, 移除该session的session_ref
-        3. 如果block.ref_cnt == 0(在free queue中):
-        - 清除session_ref后, 如果session_ref为空且TTL已过:
-            将block从B区移到A区, 使其优先被重新分配
-        - 如果session_ref非空: block仍在B区, 其他session仍可prefix cache命中
-        - 如果TTL未过: block仍在C区, 只清除session_ref, 等TTL过后再移动
-        4. 如果block.ref_cnt > 0(被活跃request使用)
-        - 只清除session_ref, 不影响block的使用
-
-        Returns:
-            dict: 清理统计信息
-        """
-        block_ids = self.get_session_blocks(session_id)
-        freed_blocks = 0
-        orphaned_blocks = 0
-
-        for block_id in block_ids:
-            block = self.blocks[block_id]
-            if session_id in block._session_ref:
-                block._session_ref.discard(session_id)
-                self._remove_block_session(block_id, session_id)
-
-                if block.ref_cnt == 0 and not block.is_null:
-                    if not block._session_ref and not block.is_ttl_protected:
-                        # session_ref全空且TTL已过，移到A区
-                        self.free_block_queue.promote_to_zone_a(block)
-                        orphaned_blocks += 1
-                    freed_blocks += 1
-
-        # 清理session层级树
-        parent = self._session_parent.pop(session_id, None)
-        if parent and parent in self._session_children:
-            self._session_children[parent].discard(session_id)
-        self._session_children.pop(session_id, None)
-
-        return {
-            "session_id": session_id,
-            "freed_blocks": freed_blocks,
-            "orphaned_blocks": orphaned_blocks,
-        }
-    
-    def free_session_tree(self, session_id: str) -> dict:
-        """递归清理session及其所有子session"""
-        children_freed = []
-
-        for child_sid in list(self._session_children.get(session_id, set())):
-            child_result = self.free_session_tree(child_sid)
-            children_freed.append(child_result)
-
-        result = self.free_session(session_id)
-
-        logger.info(
-            f"Free session tree for session {session_id}: "
-            f"current session_to_blocks: {self.session_to_blocks}, "
-            f"session_parent: {self._session_parent}, "
-            f"session_children: {self._session_children}"
-        )
-
-        return {
-            "session_id": session_id,
-            "freed_blocks": result["freed_blocks"],
-            "orphaned_blocks": result["orphaned_blocks"],
-            "sessions": children_freed,
-        }
     
     def advance_ttl_timer(self) -> None:
         """Promote expired TTL-protected free blocks from zone C to A/B."""

@@ -140,7 +140,6 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
-        session_id: str | None = None,
     ) -> None:
         """
         Add the new computed blocks to the request. Optionally allocate new
@@ -159,7 +158,6 @@ class KVCacheCoordinator(ABC):
                 new_computed_blocks[i],
                 num_local_computed_tokens,
                 num_external_computed_tokens,
-                session_id,
             )
 
     def allocate_new_blocks(
@@ -168,7 +166,6 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
-        session_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -194,7 +191,6 @@ class KVCacheCoordinator(ABC):
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
                 num_tokens_main_model,
-                session_id,
             )
             for manager in self.single_type_managers
         )
@@ -268,39 +264,15 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-        session_id: str | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
 
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
+        # self.block_pool.advance_ttl_timer()
         for manager in self.single_type_managers:
             manager.new_step_starts()
-    
-    def free_session(self, session_id: str) -> dict:
-        free_result = None
-        for manager in self.single_type_managers:  # todo 多个manager如何返回
-            free_result = manager.free_session(session_id)
-        return free_result
 
-    def free_session_tree(self, session_id: str) -> dict:
-        free_result = None
-        for manager in self.single_type_managers:  # todo 多个manager如何返回
-            free_result = manager.free_session_tree(session_id)
-        return free_result
-    
-    def record_request_ttl(self, request_id: str, ttl: float | None) -> None:
-        for manager in self.single_type_managers:
-            manager.record_request_ttl(request_id, ttl)
-
-    def register_session(
-        self,
-        session_id: str | None,
-        parent_session_id: str | None = None,
-    ) -> None:
-        if session_id is None:
-            return
-        self.block_pool.register_session(session_id, parent_session_id)
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
     """
@@ -343,7 +315,6 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-        session_id: str | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -404,7 +375,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-        session_id: str | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
@@ -416,7 +386,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
-            session_id=session_id,
         )
         return hit_blocks, len(hit_blocks[0]) * self.block_size
 
@@ -520,7 +489,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-        session_id: str | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """
         Find the longest cache hit using an iterative fixed-point algorithm.
@@ -533,7 +501,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         Args:
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
-            session_id: The ID of the session.
+        
         Returns:
             A tuple containing:
                 - A tuple of the cache hit blocks for each single type manager.
@@ -594,7 +562,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     kv_cache_spec=spec,
                     use_eagle=use_eagle,
                     alignment_tokens=self.lcm_block_size,
-                    session_id=session_id,
                 )
                 _new_hit_length = len(hit_blocks[0]) * spec.block_size
                 if use_eagle:

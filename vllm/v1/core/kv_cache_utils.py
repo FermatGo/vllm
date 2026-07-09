@@ -9,7 +9,7 @@ import os
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, replace, field
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NewType, TypeAlias, cast, overload
 
@@ -131,10 +131,10 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
-    # Record which sessions have referenced this block.
+    # Record how many sessions have referenced this block.
     # A session references a block only once.
     # Independent of ref_cnt.
-    _session_ref: set[str] = field(default_factory=set)
+    _session_ref_cnt: int = 0
 
     _ttl_expire_at: float = 0.0
 
@@ -165,18 +165,16 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
-    
-    @property
-    def session_ref(self) -> set[str]:
-        return self._session_ref
 
     @property
     def num_session_refs(self) -> int:
-        return len(self._session_ref)
+        return self._session_ref_cnt
 
     @property
-    def is_ttl_protected(self) -> bool:
-        """block 是否在 TTL 保留期内(不能被重新分配)"""
+    def is_ephemeral(self) -> bool:
+        """判断当前 block 是否处于 ephemeral 保护期。
+        本地计算，不依赖外部状态，仅根据 _ttl_expire_at 判断。
+        """
         return self._ttl_expire_at > 0 and time.monotonic() < self._ttl_expire_at
 
 
@@ -288,7 +286,7 @@ class FreeKVCacheBlockQueue:
                         logger.info(
                             f"popleft: Promoted expired C-zone block id {curr_block.block_id} "
                             f"to zone B."
-                            f"block._session_ref: {curr_block._session_ref}. "
+                            f"block._session_ref_cnt: {curr_block._session_ref_cnt}. "
                             f"block._ttl_expire_at: {curr_block._ttl_expire_at}. "
                         )
                     else:
@@ -296,7 +294,7 @@ class FreeKVCacheBlockQueue:
                         logger.info(
                             f"popleft: Promoted expired C-zone block id {curr_block.block_id} "
                             f"to zone A."
-                            f"block._session_ref: {curr_block._session_ref}. "
+                            f"block._session_ref_cnt: {curr_block._session_ref_cnt}. "
                             f"block._ttl_expire_at: {curr_block._ttl_expire_at}. "
                         )
 
@@ -330,7 +328,7 @@ class FreeKVCacheBlockQueue:
 
         logger.info(
             f"popleft: Popped block id {first_block.block_id} from free list."
-            f"block._session_ref: {first_block._session_ref}. "
+            f"block._session_ref_cnt: {first_block._session_ref_cnt}. "
             f"block._ttl_expire_at: {first_block._ttl_expire_at}. "
         )
 
@@ -395,7 +393,7 @@ class FreeKVCacheBlockQueue:
 
         logger.info(
             f"remove: Removing block id {block.block_id} from free list. "
-            f"block._session_ref: {block._session_ref}. "
+            f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
         )
 
@@ -411,7 +409,7 @@ class FreeKVCacheBlockQueue:
                 "prev_free_block of fake_free_list_tail should always exist"
             )
         
-        if block.is_ttl_protected:
+        if block.is_ephemeral:
             logger.info(f"append: Appending TTL-protected block id {block.block_id} to free list.")
             # C zone: append before fake tail, same as original append.
             prev_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
@@ -442,7 +440,7 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks += 1
 
         logger.info(
-            f"block._session_ref: {block._session_ref}. "
+            f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
         )
 
@@ -521,7 +519,7 @@ class FreeKVCacheBlockQueue:
 
         logger.info(
             f"promote_to_zone_a: Promoting block id {block.block_id} to zone A."
-            f"block._session_ref: {block._session_ref}. "
+            f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
         )
     
@@ -558,9 +556,54 @@ class FreeKVCacheBlockQueue:
 
         logger.info(
             f"promote_to_zone_b: Promoting block id {block.block_id} to zone B."
-            f"block._session_ref: {block._session_ref}. "
+            f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
         )
+    
+    def promote_to_zone_c(self, block: KVCacheBlock) -> None:
+        """Move an existing free block to the tail of zone B."""
+        if block.prev_free_block is None or block.next_free_block is None:
+            raise RuntimeError(f"promote_to_zone_c() called on invalid block: {block}")
+
+        prev_block = block.prev_free_block
+        next_block = block.next_free_block
+
+        if block is self.zone1_end:
+            self.zone1_end = prev_block if prev_block is not self.fake_free_list_head else None
+        if block is self.zone2_end:
+            self.zone2_end = (
+                prev_block
+                if prev_block is not self.fake_free_list_head
+                and prev_block is not self.zone1_end
+                else None
+            )
+
+        prev_block.next_free_block = next_block
+        next_block.prev_free_block = prev_block
+
+        prev_block = self.fake_free_list_tail.prev_free_block
+        assert prev_block is not None
+        next_block = self.fake_free_list_tail
+
+        prev_block.next_free_block = block
+        block.prev_free_block = prev_block
+        block.next_free_block = next_block
+        next_block.prev_free_block = block
+    
+    def on_block_meta_changed(self, block: KVCacheBlock) -> None:
+        """block metadata（_session_ref_cnt 或 _ttl_expire_at）变化后重新评估分区"""
+        if block.ref_cnt > 0 or block.is_null:
+            return  # block 被活跃请求使用，不在 free queue 中
+
+        if block.is_ephemeral:
+            # C区：ephemeral 保护中，不可分配
+            self.promote_to_zone_c(block)
+        elif block._session_ref_cnt > 0:
+            # B区：无 ephemeral 保护但有 session 引用
+            self.promote_to_zone_b(block)
+        else:
+            # A区：无保护、无引用，优先分配
+            self.promote_to_zone_a(block)
 
 
 def need_extra_keys(request: Request) -> bool:
@@ -2339,7 +2382,7 @@ class TTLTimerWheel:
         
         logger.info(
             f"Inserting block {block.block_id} into TTLTimerWheel, "
-            f"block._session_ref={block._session_ref},"
+            f"block._session_ref_cnt={block._session_ref_cnt},"
             f"block._ttl_expire_at={block._ttl_expire_at:.2f}, "
             f"block.ref_cnt={block.ref_cnt}, "
             f"with expire_at={expire_at:.2f}"

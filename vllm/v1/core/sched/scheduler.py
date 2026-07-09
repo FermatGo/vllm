@@ -39,6 +39,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.agentic_cache_ttl_manager import TTLManager, example_expired_callback
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -303,6 +304,12 @@ class Scheduler(SchedulerInterface):
             )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+
+        self.session_aware_manager = SessionAwareManager(self.kv_cache_manager)
+        self.kv_cache_manager.set_session_event_callbacks(
+            on_blocks_allocated=self.session_aware_manager.on_blocks_allocated_for_request,
+            on_block_cache_hit=self.session_aware_manager.on_block_cache_hit_for_request,
+        )
 
     def _mamba_block_aligned_split(
         self,
@@ -2342,3 +2349,9 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+    def free_session(self, session_id: str) -> dict:
+        return self.session_aware_manager.free_session(session_id)
+
+    def free_session_tree(self, session_id: str) -> dict:
+        return self.session_aware_manager.free_session_tree(session_id)
