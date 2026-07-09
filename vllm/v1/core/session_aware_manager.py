@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from __future__ import annotations
 import time
-import itertools
+from typing import Callable, Any
 from dataclasses import dataclass, field
 
 from vllm.logger import init_logger
 from vllm.v1.request import Request
 from vllm.entrypoints.openai.chat_completion.protocol import CacheControlParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager, KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from vllm.v1.core.session_aware_pooling_manager import SessionEventListener
+#from vllm.v1.core.session_aware_pooling_manager import SessionEventListener
+from vllm.v1.engine import ContextManagementEditsParams, ContextManagementParams
 
 
 logger = init_logger(__name__)
@@ -59,10 +59,14 @@ class SessionAwareManager:
         self._ttl_manager = TTLManager(on_expired=self._on_ttl_expired)
 
         # Session 控制器
-        self._session_controller = SessionController(self)
+        self._session_controller = SessionController(
+            execute_offload=self._execute_offload,
+            execute_prefetch=self._execute_prefetch,
+            execute_evict=self._execute_evict
+        )
 
         # 新增：事件监听器列表
-        self._event_listeners: list[SessionEventListener] = []
+        # self._event_listeners: list[SessionEventListener] = []
 
     def on_block_cache_hit_for_request(
         self, 
@@ -184,7 +188,7 @@ class SessionAwareManager:
     
     def _on_ttl_expired(self, block_id: int, session_id: str) -> None:
         """ephemeral block TTL 到期回调"""
-
+        logger.info(f"working on _on_ttl_expired in SAM for block {block_id} and session id {session_id}")
         record = self._block_sessions.get(block_id, {}).get(session_id)
         if record is None or not record.is_ephemeral:
             return
@@ -328,10 +332,11 @@ class SessionAwareManager:
             )
             # 标记 block hash 可被惰性清除(待定)
             # self._mark_block_hash_evictable(block_id)
-    
-    def add_event_listener(self, listener: SessionEventListener):
-        """注册事件监听器（SPM 调用）"""
-        self._event_listeners.append(listener)
+
+    #TODO: 待合入SPM
+    # def add_event_listener(self, listener: SessionEventListener):
+    #     """注册事件监听器（SPM 调用）"""
+    #     self._event_listeners.append(listener)
 
     def _notify_event(self, event_type: str, **kwargs):
         """通知所有监听器"""
@@ -341,16 +346,398 @@ class SessionAwareManager:
                 handler(**kwargs)
     
 
+@dataclass
+class TTLBlockEntry:
+    block_id: int
+    session_id: str
+    ttl_expire_at: float
 
+class TTLTimerWheel:
+    """Best-effort timer wheel for TTL-protected free KV cache blocks.
 
+    This class does not mutate the free-block queue. It only tracks when a
+    block may become eligible for promotion out of zone C. Callers should
+    validate that returned blocks are still in the free queue, then call
+    FreeKVCacheBlockQueue.promote_to_zone_a/b() as appropriate.
+    """
 
+    def __init__(self, tick_count: int = 60):
+        """Initialize the timer wheel.
+
+        Parameters
+        ----------
+        tick_count : int
+            Number of slots in the wheel. Each slot corresponds to one
+            time unit (second). A block whose TTL expires at time T is
+            placed in slot ``int(T) % tick_count``. The wheel wraps
+            around, so tick_count also determines the maximum TTL
+            range that can be uniquely tracked.
+        """
+        self.slots: list[list[TTLBlockEntry]] = [[] for _ in range(tick_count)]
+        self.current_slot = 0
+        self.tick_count = tick_count
+
+        logger.info(
+            f"Initialized TTLTimerWheel with {tick_count} slots."
+        )
+
+    def insert(self, block: TTLBlockEntry, expire_at: float) -> None:
+        """Insert a block into the wheel at the slot corresponding to
+        its expiration time.
+
+        Parameters
+        ----------
+        block : TTLBlockEntry
+            The block entry to track.
+        expire_at : float
+            Absolute timestamp (e.g. time.monotonic()) at which the
+            block's TTL expires. The block is placed in slot
+            ``int(expire_at) % tick_count``.
+        """
+        tick_index = int(expire_at) % self.tick_count
+        self.slots[tick_index].append(block)
+
+        logger.info(
+            f"Inserting block {block.block_id} into TTLTimerWheel, "
+            f"block.session_id={block.session_id},"
+            f"block.ttl_expire_at={block.ttl_expire_at:.2f}, "
+        )
+
+    def remove(self, block: TTLBlockEntry) -> None:
+        """Remove a block from the wheel.
+
+        Uses the block's ``ttl_expire_at`` to locate its slot.
+        If the block has already been collected by ``advance()``
+        (i.e. its TTL already expired), it won't be found in the
+        wheel and a warning is logged instead of raising an error.
+
+        Parameters
+        ----------
+        block : TTLBlockEntry
+            The block entry to remove. Must be the same object that
+            was passed to ``insert()`` (uses list.remove identity
+            check).
+        """
+        tick_index = int(block.ttl_expire_at) % self.tick_count
+        slot = self.slots[tick_index]
+        try:
+            slot.remove(block)
+        except ValueError:
+            logger.warning(
+                "Block %d not found in slot %d (expire_at=%.2f), "
+                "may have already expired.",
+                block.block_id, tick_index, block.ttl_expire_at,
+            )
+            return
+
+        logger.info(
+            "Removed block %d from TTLTimerWheel slot %d, "
+            "session_id=%s, expire_at=%.2f.",
+            block.block_id, tick_index,
+            block.session_id, block.ttl_expire_at,
+        )
+
+    def advance(self, now: float) -> list[TTLBlockEntry]:
+        """Advance the wheel to the current time and return all blocks
+        whose TTL has expired.
+
+        Moves ``current_slot`` forward to ``int(now) % tick_count``,
+        collecting and clearing every slot along the way. The returned
+        blocks are those whose TTL deadline falls in the time range
+        between the previous position and the current time.
+
+        Important: this method only **identifies** expired blocks; it
+        does not mutate the free-block queue or change block zones.
+        Callers should validate that returned blocks are still in the
+        free queue, then apply the appropriate zone transition.
+
+        Parameters
+        ----------
+        now : float
+            Current time, typically ``time.monotonic()``.
+
+        Returns
+        -------
+        list[TTLBlockEntry]
+            All blocks that expired between the previous wheel
+            position and ``now``.
+        """
+        expired = []
+        target_slot = int(now) % self.tick_count
+        while self.current_slot != target_slot:
+            expired.extend(self.slots[self.current_slot])
+            self.slots[self.current_slot].clear()
+            self.current_slot = (self.current_slot + 1) % self.tick_count
+        if len(expired) > 0:
+            logger.info(
+                f"Advancing TTLTimerWheel to time {now:.2f}, "
+                f"(current_slot={self.current_slot})."
+                f" Expired blocks: {[block.block_id for block in expired]}."
+            )
+
+        return expired
 
 class TTLManager:
-    """Block 级 TTL 管理器"""
+    """Block 级 TTL 管理器.
 
+    使用 ``(block_id, session_id)`` 作为键跟踪每个 block 的 TTL，
+    内部维护一个 TTLTimerWheel 用于高效发现过期 entry。当 entry
+    过期时调用初始化时传入的 ``on_expired`` 回调通知调用方。
+    """
+
+    def __init__(self, on_expired: Callable[[int, str], None]):
+        """
+        Parameters
+        ----------
+        on_expired : Callable[[int, str], None]
+            Block 过期时的回调，签名为 ``on_expired(block_id, session_id)``。
+            调用方在此回调里执行实际的 zone 转换 / 资源回收。
+        """
+        self._on_expired = on_expired
+        self._entries: dict[tuple[int, str], TTLBlockEntry] = {}
+        self._timer_wheel = TTLTimerWheel(tick_count=3600)
+
+        logger.info("TTLManager initialized with on_expired=%s",
+                    getattr(on_expired, "__name__", repr(on_expired)))
+
+    def register(self, block_id: int, session_id: str,
+                 expire_at: float) -> None:
+        """注册或更新一个 block 的 TTL。
+
+        如果 ``(block_id, session_id)`` 已存在：
+          - 当新的 ``expire_at`` 比旧的更晚时，先从 timer wheel 移除旧
+            entry，更新 expire_at 后重新插入；
+          - 否则忽略（保留更晚的过期时间）。
+        如果不存在：创建新的 TTLBlockEntry 并插入 timer wheel。
+        """
+        key = (block_id, session_id)
+        if key in self._entries:
+            old_entry = self._entries[key]
+            if expire_at > old_entry.ttl_expire_at:
+                self._timer_wheel.remove(old_entry)
+                old_entry.ttl_expire_at = expire_at
+                self._timer_wheel.insert(old_entry, expire_at)
+        else:
+            entry = TTLBlockEntry(
+                block_id=block_id,
+                session_id=session_id,
+                ttl_expire_at=expire_at,
+            )
+            self._entries[key] = entry
+            self._timer_wheel.insert(entry, expire_at)
+        logger.info(f"Register block_id {block_id} and session id {session_id} with ttl {expire_at} in TTL Manager")
+
+    def update(self, block_id: int, session_id: str,
+               new_expire_at: float) -> None:
+        """更新 block 的 TTL，语义等同于 ``register``。"""
+        self.register(block_id, session_id, new_expire_at)
+
+    def remove(self, block_id: int, session_id: str) -> None:
+        """显式移除一个 block 的 TTL 跟踪。
+
+        同时从 ``_entries`` 和 timer wheel 中删除。如果不存在则静默忽略。
+        """
+        #TODO: 联调时确保，对于某个block_id的不同操作，记录的key值是一致的
+        key = (block_id, session_id)
+        if key in self._entries:
+            entry = self._entries.pop(key)
+            self._timer_wheel.remove(entry)
+        else:
+            logger.info(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
+
+    def tick(self, now: float | None = None) -> None:
+        """推进 timer wheel，处理所有已过期的 entry。
+
+        对每个由 timer wheel 收集到的过期 entry，先校验 ``now >= expire_at``
+        （timer wheel 是 best-effort，slot 里可能含尚未真正过期的 entry），
+        然后从 ``_entries`` 移除并调用 ``on_expired`` 回调。
+
+        Parameters
+        ----------
+        now : float, optional
+            当前时间戳，默认 ``time.monotonic()``。
+        """
+        now = now if now is not None else time.monotonic()
+        expired_entries = self._timer_wheel.advance(now)
+        for entry in expired_entries:
+            if now >= entry.ttl_expire_at:
+                self._entries.pop(
+                    (entry.block_id, entry.session_id), None)
+                self._on_expired(entry.block_id, entry.session_id)
+
+def example_expired_callback(block_id: int, session_id: str) -> None:
+    logger.info(f"block_id {block_id} and session_id {session_id} is processing on TTL expiration")
 
 class SessionController:
-    """Context management edits 执行行器"""
+    """Context management edits 执行器。
+
+    处理请求携带的 context_management.edits，根据
+    manage_request 标志决定是立即执行还是在请求完成后执行。
+    通过注册回调执行实际的 block 操作，不感知具体的
+    offload/prefetch/evict 实现。
+
+    Required callbacks
+    ------------------
+    execute_offload  (block_ids: list[int], session_id: str) -> None
+        执行 offload 操作。
+    execute_prefetch (block_ids: list[int], session_id: str) -> None
+        执行 prefetch 操作。
+    execute_evict   (block_ids: list[int], session_id: str) -> None
+        执行 evict 操作。
+    """
+
+    _REQUIRED_CALLBACKS: list[str] = [
+        "execute_offload",
+        "execute_prefetch",
+        "execute_evict",
+    ]
+
+    def __init__(
+        self,
+        callbacks: dict[str, Callable[..., Any]] | None = None,
+        **kw_callbacks: Callable[..., Any],
+    ):
+        """
+        Parameters
+        ----------
+        callbacks : dict[str, Callable], optional
+            A mapping of {name: fn} to register in bulk.
+        **kw_callbacks
+            Same as *callbacks* but passed as keyword arguments.
+        """
+        self._registry: dict[str, Callable[..., Any]] = {}
+
+        if callbacks:
+            self._registry.update(callbacks)
+        if kw_callbacks:
+            self._registry.update(kw_callbacks)
+
+        missing = [
+            name for name in self._REQUIRED_CALLBACKS
+            if name not in self._registry
+        ]
+        if missing:
+            raise ValueError(
+                f"Missing required callbacks: {missing}. "
+                f"Provide them via `callbacks` dict or keyword arguments."
+            )
+
+        # request_id → [(edit, session_id), ...]
+        self._pending_edits: dict[str, list[tuple[ContextManagementEditsParams, str]]] = {}
+
+        logger.info("SessionController initialized with callbacks: %s",
+                    list(self._registry))
+
+    # ------------------------------------------------------------------
+    #  Registry management
+    # ------------------------------------------------------------------
+
+    def register(self, name: str, fn: Callable[..., Any]) -> None:
+        """Register (or overwrite) a callback by *name*."""
+        self._registry[name] = fn
+        logger.debug("Registered callback: %s", name)
+
+    def unregister(self, name: str) -> None:
+        """Remove a callback.  Required callbacks cannot be removed."""
+        if name in self._REQUIRED_CALLBACKS:
+            raise ValueError(
+                f"Cannot unregister required callback '{name}'."
+            )
+        self._registry.pop(name, None)
+        logger.debug("Unregistered callback: %s", name)
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+
+    def process_request_edits(
+        self,
+        request_id: str,
+        session_id: str | None,
+        context_management: "ContextManagementParams | None",
+    ) -> None:
+        """处理请求携带的 context_management edits。
+
+        Parameters
+        ----------
+        request_id : str
+            请求唯一标识。
+        session_id : str | None
+            请求所属的 session。为 None 时直接忽略 edits。
+        context_management : ContextManagementParams | None
+            请求中的 context_management 字段。
+        """
+        if context_management is None or context_management.edits is None:
+            return
+
+        if session_id is None:
+            logger.warning(
+                "request %s has context_management.edits but no session_id, "
+                "skipping.", request_id)
+            return
+
+        if context_management.manage_request:
+            # 管理请求：不执行请求本身，直接执行所有 edits
+            logger.info(
+                "Processing manage_request edits for request %s, "
+                "session %s, %d edits.",
+                request_id, session_id, len(context_management.edits))
+            for edit in context_management.edits:
+                self._execute_single_edit(edit, session_id)
+        else:
+            # 普通请求：记录 edits，在请求完成后执行
+            logger.info(
+                "Deferring %d edits for request %s, session %s.",
+                len(context_management.edits), request_id, session_id)
+            self._pending_edits[request_id] = [
+                (edit, session_id) for edit in context_management.edits
+            ]
+
+    def on_request_completed(self, request_id: str) -> None:
+        """请求完成后执行其挂起的 edits。"""
+        pending = self._pending_edits.pop(request_id, None)
+        if pending is None:
+            return
+
+        logger.info(
+            "Executing %d deferred edits for completed request %s.",
+            len(pending), request_id)
+        for edit, session_id in pending:
+            self._execute_single_edit(edit, session_id)
+
+    # ------------------------------------------------------------------
+    #  Internal
+    # ------------------------------------------------------------------
+
+    def _execute_single_edit(
+        self,
+        edit: ContextManagementEditsParams,
+        session_id: str,
+    ) -> None:
+        """执行单个 edit，通过注册的回调执行实际操作。"""
+        # block_start / block_end 由 pymotor 从 message index 转换而来
+        if edit.block_start is None or edit.block_end is None:
+            logger.info(
+                "Edit type=%s has no block_start/block_end, skipping. edit=%s",
+                edit.type, edit)
+            return
+
+        block_ids = list(range(edit.block_start, edit.block_end + 1))
+        if not block_ids:
+            return
+
+        logger.info(
+            "Executing edit type=%s for session %s on blocks %s "
+            "(block_start=%d, block_end=%d).",
+            edit.type, session_id, block_ids, edit.block_start, edit.block_end)
+
+        callback_name = f"execute_{edit.type}"
+        fn = self._registry.get(callback_name)
+        if fn is None:
+            logger.warning("No callback registered for edit type: %s, skipping.", edit.type)
+            return
+
+        fn(block_ids, session_id)
 
 
 def compute_ephemeral_range(

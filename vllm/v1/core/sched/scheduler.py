@@ -40,7 +40,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.session_aware_manager import SessionAwareManager
-from vllm.v1.core.agentic_cache_ttl_manager import TTLManager, example_expired_callback
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -53,7 +52,7 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, ContextManagementEditsParams, ContextManagementParams
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -247,10 +246,6 @@ class Scheduler(SchedulerInterface):
         ):
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
-        self.ttl_manager = TTLManager(
-            on_expired=example_expired_callback,
-        )
-
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         self.scheduler_reserve_full_isl = (
@@ -361,20 +356,30 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
-    def free_session(self, session_id: str) -> dict:
-        """
-        free kv block for the session
-        :param session_id: str, the session is
-        :return: Bool
-        """
-        logger.info(f"trying to free session {session_id}")
-        free_result = self.kv_cache_manager.free_session_tree(session_id)
+    def register_request_context_management_edits(
+        self,
+        request_id: str,
+        session_id: str | None,
+        context_management: "ContextManagementParams | None",
+    ) -> None:
+        logger.info(f"register context management with req id {request_id} session id {session_id}")
+        self.session_aware_manager._session_controller.process_request_edits(request_id, session_id, context_management)
 
-        logger.warning(f"===== free_session, free_result = {free_result}")
 
-        logger.info(f"free sesssion {session_id} kv with freed_blocks {free_result['freed_blocks']} and "
-                    f"orphaned_blocks {free_result['orphaned_blocks']}")
-        return free_result
+    # def free_session(self, session_id: str) -> dict:
+    #     """
+    #     free kv block for the session
+    #     :param session_id: str, the session is
+    #     :return: Bool
+    #     """
+    #     logger.info(f"trying to free session {session_id}")
+    #     free_result = self.kv_cache_manager.free_session_tree(session_id)
+    #
+    #     logger.warning(f"===== free_session, free_result = {free_result}")
+    #
+    #     logger.info(f"free sesssion {session_id} kv with freed_blocks {free_result['freed_blocks']} and "
+    #                 f"orphaned_blocks {free_result['orphaned_blocks']}")
+    #     return free_result
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -414,9 +419,9 @@ class Scheduler(SchedulerInterface):
         # First, schedule the RUNNING requests.
         req_index = 0
         #TODO: move to SAM and call SAM.ttl_manager in schedule()
-        logger.info("start to check cache ttl in scheduler")
-        self.ttl_manager.tick()
-        logger.info("finish to check cache ttl in scheduler")
+        #logger.info("start to check cache ttl in scheduler")
+        self.session_aware_manager._ttl_manager.tick()
+        #logger.info("finish to check cache ttl in scheduler")
 
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
@@ -428,9 +433,9 @@ class Scheduler(SchedulerInterface):
             #   edits=[ContextManagementEditsParams(type='offload', start=6, end=9, target='messages', block_start=3, block_end=4),
             #   ContextManagementEditsParams(type='offload', start=6, end=9, target='messages', block_start=3, block_end=4)]),
             #   request.session_management_flag = 0
-            logger.info(f'===== schedule, request = {request}, request.session_id = {request.session_id}, request.parent_session_id = {request.parent_session_id}, '
-                           f'request.ttl = {request.ttl}, request.cache_control = {request.cache_control}, request.context_management = {request.context_management}, '
-                           f'request.session_management_flag = {request.session_management_flag}')
+            # logger.info(f'===== schedule, request = {request}, request.session_id = {request.session_id}, request.parent_session_id = {request.parent_session_id}, '
+            #                f'request.ttl = {request.ttl}, request.cache_control = {request.cache_control}, request.context_management = {request.context_management}, '
+            #                f'request.session_management_flag = {request.session_management_flag}')
 
             if (
                 request.num_output_placeholders > 0
@@ -1887,6 +1892,7 @@ class Scheduler(SchedulerInterface):
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self.kv_cache_manager.free(request)
+        self.session_aware_manager._session_controller.on_request_completed(request.request_id)
         del self.requests[request.request_id]
 
     @property

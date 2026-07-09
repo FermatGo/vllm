@@ -21,7 +21,6 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
-    TTLTimerWheel,
     generate_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
@@ -171,8 +170,6 @@ class BlockPool:
         # list of free blocks (including eviction candidates when caching is
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
-
-        self.ttl_timer_wheel = TTLTimerWheel()
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
@@ -518,43 +515,3 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
-    
-    
-    def advance_ttl_timer(self) -> None:
-        """Promote expired TTL-protected free blocks from zone C to A/B."""
-        now = time.monotonic()
-
-        for block in self.ttl_timer_wheel.advance(now):
-            # The block may have been allocated after it was inserted into the
-            # timer wheel, or it may be the null block.
-            if block.is_null or block.ref_cnt != 0:
-                continue
-
-            # Only blocks currently in the free queue can be promoted.
-            if block.prev_free_block is None or block.next_free_block is None:
-                continue
-
-            # Timer wheel entries are candidates. Re-check the real expire time.
-            if block._ttl_expire_at <= 0:
-                continue
-
-            if now < block._ttl_expire_at:
-                # With a coarse wheel or refreshed TTL, this entry is not actually
-                # expired yet. Put it back.
-                self.ttl_timer_wheel.insert(block, block._ttl_expire_at)
-                continue
-
-            block._ttl_expire_at = 0.0
-
-            if block.num_session_refs > 0:
-                self.free_block_queue.promote_to_zone_b(block)
-                logger.info(f"promote to b block id {block.block_id}, "
-                            f"_session_ref id {block._session_ref}, "
-                            f"ttl is {block._ttl_expire_at}, "
-                            f"ref_cnt {block.ref_cnt}.")
-            else:
-                self.free_block_queue.promote_to_zone_a(block)
-                logger.info(f"promote to a block id {block.block_id}, "
-                            f"_session_ref id {block._session_ref}, "
-                            f"ttl is {block._ttl_expire_at}, "
-                            f"ref_cnt {block.ref_cnt}.")
