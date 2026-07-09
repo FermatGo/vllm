@@ -153,18 +153,31 @@ class ContextManagementEditsParams(OpenAIBaseModel): # 上下文编辑
     type: Literal["offload","prefetch","evict"] = "offload"
     start: int = Field(default=0)
     end: int = Field(default=0)
-    target: Literal["messages", "tools"] = "messages"
+    target: Literal["session", "messages", "tools"] = "messages"
+    block_start: int | None = Field(default=None, description="pymotor 转换的起始 block index")
+    block_end: int | None = Field(default=None, description="pymotor 转换的结束 block index")
 
 
 class ContextManagementParams(OpenAIBaseModel):
-    manage_request: bool | None = Field(default=False)  # 仅kvc管理请求，出现该字段表示请求本身内容并不会被执行
+    manage_request: bool | None = Field(default=False)  # 仅kvc管理请求，出现该字段表示请求本身内容并不会被执行，直接执行所有 edits 操作（纯管理请求）
     edits: list[ContextManagementEditsParams] = Field(default=None)
 
 
 class CacheControlParams(OpenAIBaseModel):
     type: Literal["ephemeral"] = "ephemeral"  # 仅支持 ephemeral
     ttl: float = Field(default=300.0, ge=0, le=3600)  # 缓存保留时间（秒），默认5min，最大1h
-    msg_offset: int = Field(default=0)
+    msg_offset: int | None = Field(
+        default=None,
+        description="pymotor侧为 message list 的 offset，处理成 block offset 传递到 vllm"
+    )
+    block_offset: int | None = Field(
+        default=None,
+        description="pymotor 处理添加的字段，表示 ephemeral 保护的起始 block index"
+    )
+    token_offset: int | None = Field(
+        default=None,
+        description="ephemeral 保护的起始 token offset"
+    )
 
 
 class AgentHintParams(OpenAIBaseModel):

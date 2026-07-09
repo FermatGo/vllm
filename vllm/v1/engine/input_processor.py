@@ -364,13 +364,16 @@ class InputProcessor:
                 type=prompt["cache_control"].type,
                 ttl=prompt["cache_control"].ttl,
                 msg_offset=prompt["cache_control"].msg_offset,
+                block_offset=prompt["cache_control"].block_offset,
+                token_offset=prompt["cache_control"].token_offset,
             ) if prompt.get("cache_control") else None
 
         context_management = ContextManagementParams(
                 manage_request=prompt["context_management"].manage_request,
                 edits=None if prompt["context_management"].edits is None else
                 [ContextManagementEditsParams(type=e.type, start=e.start,
-                                              end=e.end, target=e.target) for e in prompt["context_management"].edits]) if prompt.get("context_management") else None
+                                              end=e.end, target=e.target,
+                                              block_start=e.block_start, block_end=e.block_end) for e in prompt["context_management"].edits]) if prompt.get("context_management") else None
 
 
         return EngineCoreRequest(

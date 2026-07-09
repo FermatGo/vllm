@@ -413,10 +413,14 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            # ===== schedule, request = <vllm.v1.request.Request object at 0xfffb44635ed0>, request.session_id = None,
-            # request.parent_session_id = None, request.ttl = None, request.cache_control = None, request.context_management = None,
-            # request.session_management_flag = 1
-            logger.warning(f'===== schedule, request = {request}, request.session_id = {request.session_id}, request.parent_session_id = {request.parent_session_id}, '
+            # ===== schedule, request = <vllm.v1.request.Request object at 0xfffb38179b90>,
+            # request.session_id = sub-1, request.parent_session_id = main-0, request.ttl = 10.0,
+            # request.cache_control = CacheControlParams(type='ephemeral', ttl=10.0, msg_offset=6, block_offset=1, token_offset=2),
+            # request.context_management = ContextManagementParams(manage_request=False,
+            #   edits=[ContextManagementEditsParams(type='offload', start=6, end=9, target='messages', block_start=3, block_end=4),
+            #   ContextManagementEditsParams(type='offload', start=6, end=9, target='messages', block_start=3, block_end=4)]),
+            #   request.session_management_flag = 0
+            logger.info(f'===== schedule, request = {request}, request.session_id = {request.session_id}, request.parent_session_id = {request.parent_session_id}, '
                            f'request.ttl = {request.ttl}, request.cache_control = {request.cache_control}, request.context_management = {request.context_management}, '
                            f'request.session_management_flag = {request.session_management_flag}')
 

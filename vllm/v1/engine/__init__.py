@@ -81,9 +81,11 @@ class EngineCoreReadyResponse:
 @dataclass
 class ContextManagementEditsParams: # 上下文编辑
     type: Literal["offload","prefetch","evict"] = "offload"
-    start: int = 0
-    end: int = 0
+    start: int | None = None
+    end: int | None = None
     target: Literal["messages", "tools"] = "messages"
+    block_start: int | None = None
+    block_end: int | None = None
 
 
 @dataclass
@@ -96,7 +98,9 @@ class ContextManagementParams:
 class CacheControlParams:
     type: Literal["ephemeral"] = "ephemeral"  # 仅支持 ephemeral
     ttl: float = 300.0  # 缓存保留时间（秒），默认5min，最大1h
-    msg_offset: int = 0
+    msg_offset: int | None = None
+    block_offset: int | None = None
+    token_offset: int | None = None
 
 
 class EngineCoreRequest(

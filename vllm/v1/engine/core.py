@@ -1173,21 +1173,45 @@ class EngineCoreProc(EngineCore):
         raise SystemExit
 
 
-    def _is_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any):
+    def _is_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any) -> bool:
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-
             is_session_management = req and req.context_management and req.context_management.manage_request
-            logger.warning(f'===== _is_agent_hint_session_management, type(req) = {type(req)}, is_session_management = {is_session_management}')
+            # ===== _is_agent_hint_session_management, type(req) = <class 'vllm.v1.request.Request'>, is_session_management = True
+            logger.info(f'===== _is_agent_hint_session_management, type(req) = {type(req)}, is_session_management = {is_session_management}')
             return is_session_management
+        return False
 
 
     def _process_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any):
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
 
-            logger.warning(f'===== _process_agent_hint_session_management, req.session_id = {req.session_id}, req = {req}')
+            logger.info(f'===== _process_agent_hint_session_management, req.session_id = {req.session_id}, req = {req}')
 
+            edits = req.context_management.edits
+
+            logger.info(f'===== edits = {edits}')
+
+            if edits and len(edits) > 0:
+                for edit in edits:
+                    if edit.type == "offload":
+                        logger.info(f'===== agent_hint_session_management, edit offload')
+                        # manage_session_result = self.scheduler.manage_session(req.session_id, "offload")
+
+                    elif edit.type == "prefetch":
+                        logger.info(f'===== agent_hint_session_management, edit prefetch')
+                        # manage_session_result = self.scheduler.manage_session(req.session_id, "prefetch")
+
+                    elif edit.type == "evict":
+                        logger.info(f'===== agent_hint_session_management, edit evict')
+                        # manage_session_result = self.scheduler.manage_session(req.session_id, "evict")
+
+            else:
+                logger.warning(f'context_management.edits should not be empty when context_management.manage_request is True.')
+
+
+            # free_session
             free_result = self.scheduler.free_session(req.session_id)
 
             list = [
