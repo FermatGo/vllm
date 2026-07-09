@@ -585,7 +585,7 @@ class KVCacheManager:
         if ttl_expire_at is not None:
             block._ttl_expire_at = ttl_expire_at
         if delta_ref != 0:
-            block._session_ref_cnt += delta_ref
+            block._session_ref_cnt = max(0, block._session_ref_cnt+delta_ref)
         if block.ref_cnt == 0 and not block.is_null:
             self.block_pool.free_block_queue.on_block_meta_changed(block)
     

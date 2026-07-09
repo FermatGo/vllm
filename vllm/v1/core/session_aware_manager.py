@@ -62,7 +62,8 @@ class SessionAwareManager:
         self._session_controller = SessionController(
             execute_offload=self._execute_offload,
             execute_prefetch=self._execute_prefetch,
-            execute_evict=self._execute_evict
+            execute_evict=self._execute_evict,
+            get_global_block_id_by_session=self._get_session_global_block_ids
         )
 
         # 新增：事件监听器列表
@@ -321,6 +322,12 @@ class SessionAwareManager:
         """预取: 分配新的blcok，添加session信息，加载cache（hash）"""
         for block_id in block_ids:
             self._clear_block_session_refs(block_id)
+
+    def _get_session_global_block_ids(self, session_id: str) -> list[int]:
+        blocks_result = []
+        if session_id in self._session_blocks:
+            blocks_result = list(self._session_blocks[session_id].keys())
+        return blocks_result
 
     def _execute_evict(self, block_ids: list[int], session_id: str) -> None:
         """驱逐指定范围的 block — 减少引用 + 清除当前session的TTL + 标记清除（session引用归0）"""
@@ -590,6 +597,7 @@ class SessionController:
         "execute_offload",
         "execute_prefetch",
         "execute_evict",
+        "get_global_block_id_by_session"
     ]
 
     def __init__(
@@ -722,7 +730,7 @@ class SessionController:
                 edit.type, edit)
             return
 
-        block_ids = list(range(edit.block_start, edit.block_end + 1))
+        block_ids = list(range(edit.block_start, edit.block_end))
         if not block_ids:
             return
 
@@ -731,13 +739,29 @@ class SessionController:
             "(block_start=%d, block_end=%d).",
             edit.type, session_id, block_ids, edit.block_start, edit.block_end)
 
+        callback_name = f"get_global_block_id_by_session"
+        fn = self._registry.get(callback_name)
+        if fn is None:
+            logger.warning("No callback registered for get_global_block_id_by_session")
+            return
+        global_block_ids = fn(session_id)
+
+        if len(global_block_ids) == 0:
+            logger.warning(f"Could not find session {session_id} with block ref record in SAM, failed to perform context management edit")
+            return
+
+        if edit.block_end > len(global_block_ids) or edit.block_start > len(global_block_ids):
+            logger.warning(f"session {session_id} edit: block end {edit.block_end} or block start {edit.block_start} "
+                           f"is out of index, the total kv length is {len(global_block_ids)}, fail to perform edit {edit.type}")
+
+        global_block_ids = global_block_ids[edit.block_start:edit.block_end]
         callback_name = f"execute_{edit.type}"
         fn = self._registry.get(callback_name)
         if fn is None:
             logger.warning("No callback registered for edit type: %s, skipping.", edit.type)
             return
 
-        fn(block_ids, session_id)
+        fn(global_block_ids, session_id)
 
 
 def compute_ephemeral_range(
