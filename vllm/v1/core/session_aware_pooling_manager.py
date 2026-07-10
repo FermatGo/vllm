@@ -8,8 +8,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.distributed.kv_transfer.backend import Backend
 from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 logger = logging.getLogger(__name__)
+
+_SESSION_KEY_TRACKER : "SessionKeyTracker" | None = None
+
+def get_session_key_tracker() -> "SessionKeyTracker":
+    global _SESSION_KEY_TRACKER
+    if _SESSION_KEY_TRACKER is None:
+        _SESSION_KEY_TRACKER = SessionKeyTracker()
+    return _SESSION_KEY_TRACKER
 
 @dataclass
 class SPMConfig:
@@ -242,7 +251,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         self.config = config or SPMConfig()
 
         # SessionKeyTracker — PoolKey 跟踪
-        self.key_tracker = SessionKeyTracker()
+        self.key_tracker = get_session_key_tracker()
 
         # Keep-Alive 线程
         self.keep_alive_thread: KVCacheKeepAliveThread | None = None
@@ -364,6 +373,13 @@ class SessionAwarePoolingManager(SessionEventListener):
         )
         if len(self._prefetch_queue) < self.config.prefetch_max_queue_size:
             self._prefetch_queue.append(request)
+
+    def _lookup_remote_cache(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int] | None = None,):
+        return self.connector.connector_scheduler.client.lookup(token_len, block_hashes, kv_cache_group_ids)
 
     # --- 调度循环集成 ---
 

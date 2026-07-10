@@ -67,7 +67,7 @@ class SessionAwareManager:
         )
 
         # 新增：事件监听器列表
-        # self._event_listeners: list[SessionEventListener] = []
+        self._event_listeners: list[SessionEventListener] = []
 
     def on_block_cache_hit_for_request(
         self, 
@@ -321,7 +321,15 @@ class SessionAwareManager:
     def _execute_prefetch(self, block_ids: list[int], session_id: str) -> None:
         """预取: 分配新的blcok，添加session信息，加载cache（hash）"""
         for block_id in block_ids:
-            self._clear_block_session_refs(block_id)
+            record = SessionBlockRecord(
+                session_id=session_id,
+                block_id=block_id,
+                is_ephemeral=False,
+                ttl_expire_at=0,
+                created_at=time.monotonic(),
+            )
+            # 更新 SAM 内部双向索引
+            self._add_session_block_ref(record)
 
     def _get_session_global_block_ids(self, session_id: str) -> list[int]:
         blocks_result = []
@@ -340,7 +348,6 @@ class SessionAwareManager:
             # 标记 block hash 可被惰性清除(待定)
             # self._mark_block_hash_evictable(block_id)
 
-    #TODO: 待合入SPM
     def add_event_listener(self, listener: SessionEventListener):
         """注册事件监听器（SPM 调用）"""
         self._event_listeners.append(listener)
