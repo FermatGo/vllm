@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.v1.request import Request
 from vllm.entrypoints.openai.chat_completion.protocol import CacheControlParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager, KVCacheBlocks
-#from vllm.v1.core.session_aware_pooling_manager import SessionEventListener
+from vllm.v1.core.session_aware_pooling_manager import SessionEventListener
 from vllm.v1.engine import ContextManagementEditsParams, ContextManagementParams
 
 
@@ -341,9 +341,9 @@ class SessionAwareManager:
             # self._mark_block_hash_evictable(block_id)
 
     #TODO: 待合入SPM
-    # def add_event_listener(self, listener: SessionEventListener):
-    #     """注册事件监听器（SPM 调用）"""
-    #     self._event_listeners.append(listener)
+    def add_event_listener(self, listener: SessionEventListener):
+        """注册事件监听器（SPM 调用）"""
+        self._event_listeners.append(listener)
 
     def _notify_event(self, event_type: str, **kwargs):
         """通知所有监听器"""
