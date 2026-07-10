@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.v1.request import Request
 from vllm.entrypoints.openai.chat_completion.protocol import CacheControlParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager, KVCacheBlocks
-from vllm.v1.core.session_aware_pooling_manager import SessionEventListener
+from vllm.v1.core.session_event_listener import SessionEventListener
 from vllm.v1.engine import ContextManagementEditsParams, ContextManagementParams
 
 

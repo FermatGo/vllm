@@ -3,22 +3,15 @@ import logging
 import time
 import threading
 from typing import Protocol
+import requests
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.distributed.kv_transfer.backend import Backend
 from vllm.v1.core.session_aware_manager import SessionAwareManager
+from vllm.v1.core.session_event_listener import SessionEventListener
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.kv_cache_utils import BlockHash
 
 logger = logging.getLogger(__name__)
-
-_SESSION_KEY_TRACKER : "SessionKeyTracker" | None = None
-
-def get_session_key_tracker() -> "SessionKeyTracker":
-    global _SESSION_KEY_TRACKER
-    if _SESSION_KEY_TRACKER is None:
-        _SESSION_KEY_TRACKER = SessionKeyTracker()
-    return _SESSION_KEY_TRACKER
 
 @dataclass
 class SPMConfig:
@@ -59,63 +52,24 @@ class EvictionMark:
     is_partial: bool = False   # 是否部分驱逐
 
 
-class SessionEventListener(Protocol):
-    """SPM 实现此协议，监听 SAM 的 session 生命周期事件"""
-
-    def on_session_registered(
-        self, session_id: str, parent_session_id: str | None
-    ) -> None: ...
-
-    def on_session_blocks_allocated(
-        self,
-        session_id: str,
-        block_ids: list[int],
-        pool_keys: list[str],       # 远端 PoolKey 列表（来自 AscendStoreConnector）
-        block_hashes: list[str],    # 对应的 block hash
-    ) -> None: ...
-
-    def on_session_cache_hit(
-        self,
-        session_id: str,
-        block_id: int,
-        pool_key: str | None,      # cache hit 的 block 对应的远端 PoolKey（可能无）
-        block_hash: str,
-    ) -> None: ...
-
-    def on_session_ttl_expired(
-        self, session_id: str, block_ids: list[int]
-    ) -> None: ...
-
-    def on_session_freed(self, session_id: str) -> None: ...
-
-    def on_context_management_evict(
-        self,
-        session_id: str,
-        block_ids: list[int],
-        pool_keys: list[str],      # 被驱逐 block 对应的远端 PoolKey
-    ) -> None: ...
-
-    def on_context_management_offload(
-        self, session_id: str, block_ids: list[int]
-    ) -> None: ...
-
-    def on_context_management_prefetch(
-        self,
-        session_id: str,
-        block_hashes: list[str],
-        token_len: int,
-    ) -> None: ...
-
-
 class SessionKeyTracker:
     """跟踪每个 session 写入远端存储的 PoolKey"""
+    _instance_lock = threading.Lock()
 
     def __init__(self):
-        # session_id → {PoolKey string → block_hash}
-        self._session_keys: dict[str, dict[str, str]] = {}
-        # 反向索引：PoolKey string → {session_id}
-        self._key_sessions: dict[str, set[str]] = {}
-        self._lock = threading.Lock()
+        pass
+
+    def __new__(cls):
+        if not hasattr(SessionKeyTracker, "_instance"):
+            with SessionKeyTracker._instance_lock:
+                if not hasattr(SessionKeyTracker, "_instance"):
+                    SessionKeyTracker._instance = object.__new__(cls)
+                    # session_id → {PoolKey string → block_hash}
+                    SessionKeyTracker._instance._session_keys: dict[str, dict[str, str]] = {}
+                    # 反向索引：PoolKey string → {session_id}
+                    SessionKeyTracker._instance.key_sessions: dict[str, set[str]] = {}
+                    SessionKeyTracker._instance._lock = threading.Lock()
+        return SessionKeyTracker._instance
 
     def add_keys(
         self,
@@ -251,7 +205,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         self.config = config or SPMConfig()
 
         # SessionKeyTracker — PoolKey 跟踪
-        self.key_tracker = get_session_key_tracker()
+        self.key_tracker = SessionKeyTracker()
 
         # Keep-Alive 线程
         self.keep_alive_thread: KVCacheKeepAliveThread | None = None
@@ -374,14 +328,22 @@ class SessionAwarePoolingManager(SessionEventListener):
         if len(self._prefetch_queue) < self.config.prefetch_max_queue_size:
             self._prefetch_queue.append(request)
 
-    def _lookup_remote_cache(
-        self,
-        token_len: int,
-        block_hashes: list[BlockHash],
-        kv_cache_group_ids: list[int] | None = None,):
-        return self.connector.connector_scheduler.client.lookup(token_len, block_hashes, kv_cache_group_ids)
-
     # --- 调度循环集成 ---
+
+    def _lookup_remote_cache(self, block_hashes: list[str], token_len: int) -> int:
+        res = self.connector.connector_scheduler.client.lookup(
+            token_len=token_len,
+            block_hashes=block_hashes,
+        )
+        return res
+
+    def _submit_prefetch_to_scheduler(self,
+                                        prefetch_req: PrefetchRequest,
+                                        matched_tokens: int,
+                                        scheduler: Scheduler) -> None:
+        # 待讨论
+        pass
+
 
     def process_prefetch_queue(self, scheduler: Scheduler) -> list[PrefetchRequest]:
         """在 Scheduler 调度循环中处理预取请求"""
@@ -413,8 +375,8 @@ class SessionAwarePoolingManager(SessionEventListener):
             # 3. 检查远端 KV cache 是否存在
             try:
                 matched_tokens = self._lookup_remote_cache(
-                    prefetch_req.block_hashes,
-                    prefetch_req.token_len,
+                    block_hashes=prefetch_req.block_hashes,
+                    token_len=prefetch_req.token_len,
                 )
                 if matched_tokens > 0:
                     # 4. 创建预取请求到 Scheduler
