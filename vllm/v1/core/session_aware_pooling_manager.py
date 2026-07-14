@@ -4,7 +4,6 @@ import time
 import threading
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
-from vllm.distributed.kv_transfer.backend import Backend
 from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.session_event_listener import SessionEventListener
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -122,8 +121,7 @@ class SessionKeyTracker:
 
     def get_active_keys(
         self,
-        session_ids: list[str] | None = None,
-        max_keys: int = 0,
+        session_ids: list[str] | None = None
     ) -> list[str]:
         """获取活跃 session 的 PoolKey（用于 Keep-Alive）。
         如果指定 session_ids，仅返回这些 session 的 key；
@@ -137,7 +135,7 @@ class SessionKeyTracker:
             else:
                 all_keys = set(self._key_sessions.keys())
             result = list(all_keys)
-            return result[:max_keys] if max_keys > 0 else result
+            return result
 
     def get_session_keys(self, session_id: str) -> list[str]:
         """获取指定 session 的所有 PoolKey"""
@@ -160,13 +158,13 @@ class KVCacheKeepAliveThread(threading.Thread):
 
     def __init__(
         self,
-        m_store: Backend,
+        connector: KVConnectorBase_V1,
         session_key_tracker: SessionKeyTracker,
         interval: int = 60,           # 刷新间隔（秒）
         max_keys_per_cycle: int = 0,  # 每轮最多刷新的 key 数（0=不限）
     ):
         super().__init__(daemon=True, name="KVCacheKeepAliveThread")
-        self.m_store = m_store
+        self.connector = connector
         self.tracker = session_key_tracker
         self.interval = interval
         self.max_keys = max_keys_per_cycle
@@ -174,12 +172,14 @@ class KVCacheKeepAliveThread(threading.Thread):
 
     def run(self):
         #TODO: max keys改为chunk发送
-        self.m_store.set_device()
         while not self._stopped.wait(self.interval):
             try:
-                keys = self.tracker.get_active_keys(max_keys=self.max_keys)
-                if keys:
-                    self.m_store.exists(keys)  # exists() 更新 LRU
+                keys = self.tracker.get_active_keys()
+                if not keys:
+                    continue
+                for i in range(0, len(keys), self.max_keys):
+                    batch = keys[i:i+self.max_keys]
+                    self.connector.look_up_keys(batch)
             except Exception as e:
                 logger.error("Keep-alive thread error: %s", e)
 
@@ -226,7 +226,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         if self.config.enable_keep_alive and self.connector is not None:
             #TODO: 修改线程入口
             self.keep_alive_thread = KVCacheKeepAliveThread(
-                m_store=self.connector.connector_worker.m_store,
+                connector=self.connector,
                 session_key_tracker=self.key_tracker,
                 interval=self.config.keep_alive_interval,
                 max_keys_per_cycle=self.config.max_keys_per_cycle,
