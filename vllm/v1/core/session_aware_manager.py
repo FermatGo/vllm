@@ -122,7 +122,7 @@ class SessionAwareManager:
 
             # 添加新的 session 引用（SAM 内部）
             ttl_expire_at = 0.0
-            if is_ephemeral and ephemeral_range:
+            if is_ephemeral and ephemeral_range and ephemeral_range.ttl > 0:
                 ttl_expire_at = time.monotonic() + ephemeral_range.ttl
 
             record = SessionBlockRecord(
@@ -162,10 +162,10 @@ class SessionAwareManager:
             # 已存在引用，刷新 TTL（如果是 ephemeral block）
             record = self._session_blocks[session_id][block_id]
             if record.is_ephemeral:
-                new_expire = max(
-                    record.ttl_expire_at,
-                    time.monotonic() + (record.ttl_expire_at - record.created_at)
-                )
+                new_expire = 0
+                if record.ttl_expire_at > 0:
+                    new_expire = max(record.ttl_expire_at,
+                                     time.monotonic() + (record.ttl_expire_at - record.created_at))
                 record.ttl_expire_at = new_expire
                 self._ttl_manager.update(block_id, session_id, new_expire)
                 # 刷新 block 上的 TTL
@@ -330,6 +330,7 @@ class SessionAwareManager:
             )
             # 更新 SAM 内部双向索引
             self._add_session_block_ref(record)
+        #TODO: 分配block 调用SPM notify
 
     def _get_session_global_block_ids(self, session_id: str) -> list[int]:
         blocks_result = []
