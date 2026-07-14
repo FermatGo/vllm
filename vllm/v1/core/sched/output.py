@@ -38,7 +38,6 @@ class NewRequestData:
     num_computed_tokens: int
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
-    session_id: str | None = None
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
@@ -48,8 +47,7 @@ class NewRequestData:
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
-        prefill_token_ids: list[int] | None = None,
-        session_id: str | None = None
+        prefill_token_ids: list[int] | None = None
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -62,7 +60,6 @@ class NewRequestData:
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prefill_token_ids=prefill_token_ids,
-            session_id=session_id,
         )
 
     def __repr__(self) -> str:
@@ -79,8 +76,7 @@ class NewRequestData:
             f"block_ids={self.block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"lora_request={self.lora_request},"
-            f"prompt_embeds_shape={prompt_embeds_shape},"
-            f"session_id={self.session_id},"
+            f"prompt_embeds_shape={prompt_embeds_shape}"
             ")"
         )
 
@@ -105,8 +101,7 @@ class NewRequestData:
             f"block_ids={self.block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"lora_request={self.lora_request},"
-            f"prompt_embeds_shape={prompt_embeds_shape},"
-            f"session_id={self.session_id},"
+            f"prompt_embeds_shape={prompt_embeds_shape}"
             ")"
         )
 
