@@ -7,7 +7,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.distributed.kv_transfer.backend import Backend
 from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.session_event_listener import SessionEventListener
-from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 logger = init_logger(__name__)
@@ -174,6 +173,7 @@ class KVCacheKeepAliveThread(threading.Thread):
         self._stopped = threading.Event()
 
     def run(self):
+        #TODO: max keys改为chunk发送
         self.m_store.set_device()
         while not self._stopped.wait(self.interval):
             try:
@@ -219,11 +219,12 @@ class SessionAwarePoolingManager(SessionEventListener):
         # 注册为 SAM 事件监听器
         sam.add_event_listener(self)
 
-        self.block_size = self.sam.kv_cache_manager.block_size
+        self.block_size = 0
 
     def start(self) -> None:
         """启动 Keep-Alive 线程"""
         if self.config.enable_keep_alive and self.connector is not None:
+            #TODO: 修改线程入口
             self.keep_alive_thread = KVCacheKeepAliveThread(
                 m_store=self.connector.connector_worker.m_store,
                 session_key_tracker=self.key_tracker,
