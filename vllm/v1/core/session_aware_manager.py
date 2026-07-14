@@ -330,6 +330,13 @@ class SessionAwareManager:
             )
             # 更新 SAM 内部双向索引
             self._add_session_block_ref(record)
+        block_hashes = None
+        block_ids = [0, 1, 2]
+        result = self._notify_event("context_management_prefetch",
+                                    session_id=session_id,
+                                    block_hashes=block_hashes,
+                                    block_ids=block_ids)
+        logger.info(f"_execute_prefetch result is {result}")
         #TODO: 分配block 调用SPM notify
 
     def _get_session_global_block_ids(self, session_id: str) -> list[int]:

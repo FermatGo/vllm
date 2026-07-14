@@ -1,9 +1,7 @@
 from dataclasses import dataclass
-import logging
+from vllm.logger import init_logger
 import time
 import threading
-from typing import Protocol
-import requests
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.distributed.kv_transfer.backend import Backend
@@ -12,13 +10,13 @@ from vllm.v1.core.session_event_listener import SessionEventListener
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 @dataclass
 class SPMConfig:
     """SPM 配置"""
     # Keep-Alive 配置
-    enable_keep_alive: bool = False         # 是否启用 Keep-Alive
+    enable_keep_alive: bool = True         # 是否启用 Keep-Alive
     keep_alive_interval: int = 60          # Keep-Alive 刷新间隔（秒）
     max_keys_per_cycle: int = 1024        # 每轮最多刷新的 key 数
 
@@ -27,7 +25,7 @@ class SPMConfig:
     eviction_grace_period: float = 30.0   # 驱逐宽限期（秒）
 
     # 预取配置
-    enable_prefetch: bool = False          # 是否启用主动预取
+    enable_prefetch: bool = True          # 是否启用主动预取
     prefetch_max_queue_size: int = 16     # 预取队列最大长度
     prefetch_block_reserve: int = 8        # 为预取保留的空闲 block 数量
 
@@ -41,6 +39,7 @@ class PrefetchRequest:
     pool_keys: list[str]        # 对应的 PoolKey 列表
     token_len: int               # 需要预取的 token 数量
     created_at: float            # 创建时间
+    dest_block_ids: list[int]    # 待搬入block ids
     priority: int = 0            # 优先级（0=最高，由 manage_request 触发）
 
 
@@ -220,6 +219,8 @@ class SessionAwarePoolingManager(SessionEventListener):
         # 注册为 SAM 事件监听器
         sam.add_event_listener(self)
 
+        self.block_size = self.sam.kv_cache_manager.block_size
+
     def start(self) -> None:
         """启动 Keep-Alive 线程"""
         if self.config.enable_keep_alive and self.connector is not None:
@@ -309,12 +310,19 @@ class SessionAwarePoolingManager(SessionEventListener):
     def on_context_management_prefetch(
         self,
         session_id: str,
-        block_hashes: list[str],
-        token_len: int,
-    ) -> None:
+        block_hashes: list[BlockHash],
+        block_ids: list[int]
+    ) -> bool:
         """prefetch 操作时创建预取请求"""
         if not self.config.enable_prefetch:
             return
+        token_len = len(block_ids) * self.block_size
+        logger.info(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
+                    f"token_len {token_len} block_ids {block_ids}")
+        #预取需要的参数：Pool keys, block hash以及HBM上的block id
+        #TODO: 预取请求分配block ids
+        #TODO: 传入参数对齐，需要block hash
+        #TODO: 计算token len？如何获取 1. blocksize * block数 2. pymotor传入解析
         pool_keys = self.key_tracker.get_session_keys(session_id)
         request = PrefetchRequest(
             session_id=session_id,
@@ -324,45 +332,52 @@ class SessionAwarePoolingManager(SessionEventListener):
             token_len=token_len,
             priority=0,
             created_at=time.monotonic(),
+            dest_block_ids=block_ids
         )
         if len(self._prefetch_queue) < self.config.prefetch_max_queue_size:
             self._prefetch_queue.append(request)
+            return True
+        else:
+            logger.warning(f"prefetch queue is reaching the max queue size {self.config.prefetch_max_queue_size} "
+                           f"and failed to add to the queue")
+            return False
 
     # --- 调度循环集成 ---
 
-    def _lookup_remote_cache(self, block_hashes: list[str], token_len: int) -> int:
+    def _lookup_remote_cache(self, block_hashes: list[BlockHash], token_len: int) -> int:
         res = self.connector.connector_scheduler.client.lookup(
             token_len=token_len,
             block_hashes=block_hashes,
         )
         return res
 
-    def _submit_prefetch_to_scheduler(self, prefetch_req, matched_tokens, scheduler):
+    def _submit_prefetch_to_scheduler(self, prefetch_req, matched_tokens):
         # 从 SAM 获取 session 已有的 block 和对应的 Request 对象
-        request = self.sam.get_request_by_session(prefetch_req.session_id)
-        if request is None:
-            logger.warning("Session %s has no active request, skipping prefetch", prefetch_req.session_id)
-            return
+        # request = self.sam.get_request_by_session(prefetch_req.session_id)
+        # if request is None:
+        #     logger.warning("Session %s has no active request, skipping prefetch", prefetch_req.session_id)
+        #     return
         
         # 获取 session 已有的 block_ids（通过 KVCacheManager）
-        block_ids = self.sam.get_session_block_ids(prefetch_req.session_id)
+        # block_ids = self.sam.get_session_block_ids(prefetch_req.session_id)
+        block_ids = prefetch_req.dest_block_ids
         if not block_ids:
             logger.warning("Session %s has no allocated blocks, skipping prefetch", prefetch_req.session_id)
             return
         
         # 通过 KVPoolScheduler 注入 prefetch metadata
-        scheduler.connector.connector_scheduler.add_prefetch_request(
-            prefetch_req, matched_tokens, (request, block_ids)
+        self.connector.connector_scheduler.add_prefetch_request(
+            prefetch_req, matched_tokens
         )
 
-    def process_prefetch_queue(self, scheduler: Scheduler) -> list[PrefetchRequest]:
+    def process_prefetch_queue(self) -> list[PrefetchRequest]:
         """在 Scheduler 调度循环中处理预取请求"""
 
         if not self._prefetch_queue:
             return []
 
         # 按 priority 排序（0=最高优先）
-        self._prefetch_queue.sort(key=lambda r: r.priority)
+        # self._prefetch_queue.sort(key=lambda r: r.priority)
 
         completed = []
         remaining = []
@@ -372,27 +387,19 @@ class SessionAwarePoolingManager(SessionEventListener):
             if prefetch_req.session_id not in self.sam._sessions:
                 continue  # session 已不存在，跳过
 
-            # 2. 检查本地 BlockPool 是否有足够的空闲 block
-            # 保留 prefetch_block_reserve 个 block 用于正常请求
-            available = self.sam.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
-            available -= self.config.prefetch_block_reserve
-            required = (prefetch_req.token_len + self.sam.kv_cache_manager.block_size - 1) \
-                    // self.sam.kv_cache_manager.block_size
-            if available < required:
-                remaining.append(prefetch_req)  # 资源不足，延后
-                continue
-
-            # 3. 检查远端 KV cache 是否存在
             try:
                 matched_tokens = self._lookup_remote_cache(
                     block_hashes=prefetch_req.block_hashes,
                     token_len=prefetch_req.token_len,
                 )
+                logger.info(f"lookup_remote_cache: prefetch_req with session_id {prefetch_req.session_id} "
+                            f"gets matched_tokens {matched_tokens}")
+
                 if matched_tokens > 0:
                     # 4. 创建预取请求到 Scheduler
                     # Scheduler 在下次调度时分配 block 并触发 load
                     self._submit_prefetch_to_scheduler(
-                        prefetch_req, matched_tokens, scheduler
+                        prefetch_req, matched_tokens
                     )
                 completed.append(prefetch_req)
             except Exception as e:

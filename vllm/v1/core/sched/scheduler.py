@@ -432,7 +432,9 @@ class Scheduler(SchedulerInterface):
         #logger.info("start to check cache ttl in scheduler")
         self.session_aware_manager._ttl_manager.tick()
         #logger.info("finish to check cache ttl in scheduler")
-
+        # SPM处理prefetch
+        if self.session_pooling_manager is not None:
+            self.session_pooling_manager.process_prefetch_queue()
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
@@ -1000,8 +1002,6 @@ class Scheduler(SchedulerInterface):
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
-        if self.session_pooling_manager is not None:
-            self.session_pooling_manager.process_prefetch_queue(self)
 
         if self.connector is not None:
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)

@@ -330,6 +330,7 @@ class FreeKVCacheBlockQueue:
             f"popleft: Popped block id {first_block.block_id} from free list."
             f"block._session_ref_cnt: {first_block._session_ref_cnt}. "
             f"block._ttl_expire_at: {first_block._ttl_expire_at}. "
+            f"block._block_hash: {first_block._block_hash}"
         )
 
         self.num_free_blocks -= 1
