@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.backend import Backend
 from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.session_event_listener import SessionEventListener
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class PrefetchRequest:
     """预取请求描述"""
     session_id: str
     request_id: str              # 关联的请求 ID
-    block_hashes: list[str]      # 需要预取的 block hash 列表
+    block_hashes: list[BlockHash]      # 需要预取的 block hash 列表
     pool_keys: list[str]        # 对应的 PoolKey 列表
     token_len: int               # 需要预取的 token 数量
     created_at: float            # 创建时间
@@ -67,7 +68,7 @@ class SessionKeyTracker:
                     # session_id → {PoolKey string → block_hash}
                     SessionKeyTracker._instance._session_keys: dict[str, dict[str, str]] = {}
                     # 反向索引：PoolKey string → {session_id}
-                    SessionKeyTracker._instance.key_sessions: dict[str, set[str]] = {}
+                    SessionKeyTracker._instance._key_sessions: dict[str, set[str]] = {}
                     SessionKeyTracker._instance._lock = threading.Lock()
         return SessionKeyTracker._instance
 
@@ -303,7 +304,6 @@ class SessionAwarePoolingManager(SessionEventListener):
 
     def on_context_management_offload(self, session_id: str, block_ids: list[int]) -> None:
         """offload 操作时仅移除本地 block 引用，远端 KV cache 保留"""
-        # offload 仅影响本地 block，远端 KV cache 的 Keep-Alive 保护不变
         return
 
     def on_context_management_prefetch(
@@ -337,13 +337,23 @@ class SessionAwarePoolingManager(SessionEventListener):
         )
         return res
 
-    def _submit_prefetch_to_scheduler(self,
-                                        prefetch_req: PrefetchRequest,
-                                        matched_tokens: int,
-                                        scheduler: Scheduler) -> None:
-        # 待讨论
-        pass
-
+    def _submit_prefetch_to_scheduler(self, prefetch_req, matched_tokens, scheduler):
+        # 从 SAM 获取 session 已有的 block 和对应的 Request 对象
+        request = self.sam.get_request_by_session(prefetch_req.session_id)
+        if request is None:
+            logger.warning("Session %s has no active request, skipping prefetch", prefetch_req.session_id)
+            return
+        
+        # 获取 session 已有的 block_ids（通过 KVCacheManager）
+        block_ids = self.sam.get_session_block_ids(prefetch_req.session_id)
+        if not block_ids:
+            logger.warning("Session %s has no allocated blocks, skipping prefetch", prefetch_req.session_id)
+            return
+        
+        # 通过 KVPoolScheduler 注入 prefetch metadata
+        scheduler.connector.connector_scheduler.add_prefetch_request(
+            prefetch_req, matched_tokens, (request, block_ids)
+        )
 
     def process_prefetch_queue(self, scheduler: Scheduler) -> list[PrefetchRequest]:
         """在 Scheduler 调度循环中处理预取请求"""
