@@ -307,6 +307,7 @@ class Scheduler(SchedulerInterface):
             logger.warning(f"scheduler does not have connector, failed to init SPM")
         else:
             self.session_pooling_manager = SessionAwarePoolingManager(self.session_aware_manager, self.connector)
+            self.session_pooling_manager.block_size = self.block_size
             self.session_pooling_manager.start()
             logger.info("Init session pooling manager")
 
