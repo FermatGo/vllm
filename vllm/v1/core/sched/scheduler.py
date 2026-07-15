@@ -392,6 +392,36 @@ class Scheduler(SchedulerInterface):
     #                 f"orphaned_blocks {free_result['orphaned_blocks']}")
     #     return free_result
 
+    def process_prefetch_req(self):
+        for i in range(0, len(self.session_pooling_manager._prefetch_queue)):
+            try:
+                tmp_prefetch_req = self.session_pooling_manager._prefetch_queue[i]
+                matched_tokens = self.session_pooling_manager._lookup_remote_cache(
+                    block_hashes=tmp_prefetch_req.block_hashes,
+                    token_len=tmp_prefetch_req.token_len,
+                )
+                if matched_tokens == 0:
+                    continue
+
+                tmp_req = Request(request_id=tmp_prefetch_req.tmp_req)
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    tmp_req,
+                    matched_tokens,
+                    num_external_computed_tokens=matched_tokens,
+                )
+                if new_blocks:
+                    tmp_prefetch_req.dest_block_ids = new_blocks.get_unhashed_block_ids
+                    tmp_prefetch_req.token_len = matched_tokens
+                else:
+                    break
+                self.session_pooling_manager._submit_prefetch_to_scheduler(tmp_prefetch_req, matched_tokens)
+                # TODO: 更新SAMmeta信息
+            except Exception as e:
+                logger.error("Prefetch failed for request %s: %s",
+                             tmp_prefetch_req.request_id, e)
+        # update prefetch queue
+        self.session_pooling_manager._prefetch_queue = self.session_pooling_manager._prefetch_queue[i:]
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -435,7 +465,8 @@ class Scheduler(SchedulerInterface):
         #logger.info("finish to check cache ttl in scheduler")
         # SPM处理prefetch
         if self.session_pooling_manager is not None:
-            self.session_pooling_manager.process_prefetch_queue()
+            self.process_prefetch_req()
+
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
