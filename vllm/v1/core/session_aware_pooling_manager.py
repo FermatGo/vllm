@@ -347,12 +347,12 @@ class SessionAwarePoolingManager(SessionEventListener):
         session_id: str,
         logical_block_start: int,
         logical_block_end: int,
-        block_ids: list[int]
+        block_ids: list[int] | None = None,
     ) -> bool:
         """prefetch 操作时创建预取请求"""
         if not self.config.enable_prefetch:
             return
-        token_len = len(block_ids) * self.block_size
+        token_len = len(logical_block_end - logical_block_start) * self.block_size
         block_hashes = self.key_tracker.get_session_block_hashes(session_id)[logical_block_start:logical_block_end]
         logger.info(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
                     f"token_len {token_len} block_ids {block_ids}")
