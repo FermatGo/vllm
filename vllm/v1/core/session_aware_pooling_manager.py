@@ -253,16 +253,16 @@ class SessionAwarePoolingManager(SessionEventListener):
         return
 
     # 可以通过ascend的pool_worker的回调函数来调用key_tracker.add_keys
-    # def on_session_blocks_allocated(
-    #     self,
-    #     session_id: str,
-    #     block_ids: list[int],
-    #     pool_keys: list[str],
-    #     block_hashes: list[str],
-    # ) -> None:
-    #     """block 被分配且 KV cache 被写入远端后记录 PoolKey"""
-    #     if pool_keys:
-    #         self.key_tracker.add_keys(session_id, pool_keys, block_hashes)
+    def on_session_blocks_allocated(
+        self,
+        session_id: str,
+        block_ids: list[int],
+        pool_keys: list[str],
+        block_hashes: list[str],
+    ) -> None:
+        """block 被分配且 KV cache 被写入远端后记录 PoolKey"""
+        if pool_keys:
+            self.key_tracker.add_keys(session_id, pool_keys, block_hashes)
 
     def on_session_cache_hit(
         self,
