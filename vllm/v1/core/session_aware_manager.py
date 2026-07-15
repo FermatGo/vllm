@@ -172,20 +172,39 @@ class SessionAwareManager:
                 self.kv_cache_manager.update_block_meta(
                     block_id, ttl_expire_at=new_expire
                 )
+        else:
+
+            # 新增 session 引用
+            record = SessionBlockRecord(
+                session_id=session_id,
+                block_id=block_id,
+                is_ephemeral=False,      # cache hit 的 block 不新增 ephemeral 保护
+                ttl_expire_at=0.0,
+                created_at=time.monotonic(),
+            )
+            self._add_session_block_ref(record)
+
+            # 统一接口
+            self.kv_cache_manager.update_block_meta(block_id, delta_ref=+1)
+
+        # cache hit 的 block 应当已经是完整且具有 hash 的 cached block。
+        block = self.kv_cache_manager.block_pool.blocks[block_id]
+        block_hash_with_group_id = block.block_hash
+
+        if block_hash_with_group_id is None:
+            logger.warning(
+                "Cache-hit block %s has no block hash; "
+                "skip session_cache_hit notification",
+                block_id,
+            )
             return
 
-        # 新增 session 引用
-        record = SessionBlockRecord(
+        self._notify_event(
+            "session_cache_hit",
             session_id=session_id,
             block_id=block_id,
-            is_ephemeral=False,      # cache hit 的 block 不新增 ephemeral 保护
-            ttl_expire_at=0.0,
-            created_at=time.monotonic(),
+            block_hash=block_hash_with_group_id,
         )
-        self._add_session_block_ref(record)
-
-        # 统一接口
-        self.kv_cache_manager.update_block_meta(block_id, delta_ref=+1)
     
     def _on_ttl_expired(self, block_id: int, session_id: str) -> None:
         """ephemeral block TTL 到期回调"""
@@ -205,6 +224,17 @@ class SessionAwareManager:
             block_id,
             delta_ref=-1,
             ttl_expire_at=0.0,
+        )
+
+        block = self.kv_cache_manager.block_pool.blocks[block_id]
+        block_hash_with_group_id = block.block_hash
+
+        # SAM 状态修改完成后再通知 SPM。
+        self._notify_event(
+            "session_ttl_expired",
+            session_id=[session_id],
+            block_ids=[block_id],
+            block_hash=[block_hash_with_group_id],
         )
 
     def _ensure_session_registered(self, session_id: str, parent_session_id: str) -> None:
@@ -318,25 +348,20 @@ class SessionAwareManager:
             self._remove_session_block_ref(session_id, block_id)
             self.kv_cache_manager.update_block_meta(block_id, delta_ref=-1)
 
-    def _execute_prefetch(self, block_ids: list[int], session_id: str) -> None:
+    def _execute_prefetch(
+            self, 
+            session_id: str,         
+            logical_block_start: int,
+            logical_block_end: int,
+        ) -> None:
         """预取: 分配新的blcok，添加session信息，加载cache（hash）"""
-        for block_id in block_ids:
-            record = SessionBlockRecord(
-                session_id=session_id,
-                block_id=block_id,
-                is_ephemeral=False,
-                ttl_expire_at=0,
-                created_at=time.monotonic(),
-            )
-            # 更新 SAM 内部双向索引
-            self._add_session_block_ref(record)
-        block_hashes = None
-        block_ids = [0, 1, 2]
-        result = self._notify_event("context_management_prefetch",
-                                    session_id=session_id,
-                                    block_hashes=block_hashes,
-                                    block_ids=block_ids)
-        logger.info(f"_execute_prefetch result is {result}")
+        """通知 SPM 创建远端预取任务。"""
+        self._notify_event(
+            "context_management_prefetch",
+            session_id=session_id,
+            logical_block_start=logical_block_start,
+            logical_block_end=logical_block_end,
+        )
         #TODO: 分配block 调用SPM notify
 
     def _get_session_global_block_ids(self, session_id: str) -> list[int]:
@@ -345,13 +370,37 @@ class SessionAwareManager:
             blocks_result = list(self._session_blocks[session_id].keys())
         return blocks_result
 
-    def _execute_evict(self, block_ids: list[int], session_id: str) -> None:
-        """驱逐指定范围的 block — 减少引用 + 清除当前session的TTL + 标记清除（session引用归0）"""
+    def _execute_evict(self, session_id: str, block_ids: list[int]) -> None:
+        """驱逐指定范围的 block — 减少引用 + 清除当前session的TTL + 标记清除（session引用归0）
+        清除本地引用，并通知 SPM 停止对应远端 PoolKey 的 Keep-Alive
+        """
+        affected_block_ids: list[int] = []
+        affected_block_hashes: list[str] = []
+
         for block_id in block_ids:
+            record = self._block_sessions.get(block_id, {}).get(session_id)
+            if record is None:
+                continue
+
+            if record.is_ephemeral:
+                self._ttl_manager.remove(block_id, session_id)
+
             self._remove_session_block_ref(session_id, block_id)
-            # session_ref_cnt -1 + 清除 TTL
             self.kv_cache_manager.update_block_meta(
-                block_id, delta_ref=-1, ttl_expire_at=0.0
+                block_id,
+                delta_ref=-1,
+                ttl_expire_at=0.0,
+            )
+            block_hash = self.kv_cache_manager.block_pool.blocks[block_id].block_hash
+            affected_block_hashes.append(block_hash)
+            affected_block_ids.append(block_id)
+
+        if affected_block_ids:
+            self._notify_event(
+                "context_management_evict",
+                session_id=session_id,
+                block_ids=affected_block_ids,
+                block_hashes=affected_block_hashes,
             )
             # 标记 block hash 可被惰性清除(待定)
             # self._mark_block_hash_evictable(block_id)
@@ -362,10 +411,19 @@ class SessionAwareManager:
 
     def _notify_event(self, event_type: str, **kwargs):
         """通知所有监听器"""
-        for listener in self._event_listeners:
+        for listener in tuple(self._event_listeners):
             handler = getattr(listener, f"on_{event_type}", None)
-            if handler is not None:
+            if handler is None:
+                continue
+
+            try:
                 handler(**kwargs)
+            except Exception:
+                logger.exception(
+                    "Session event listener %r failed while handling %s",
+                    listener,
+                    event_type,
+                )
     
 
 @dataclass
