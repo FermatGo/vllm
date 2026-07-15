@@ -48,3 +48,10 @@ class SessionEventListener(Protocol):
         block_hashes: list[BlockHashWithGroupId],
         token_len: int,
     ) -> None: ...
+
+    def on_check_matched_token(
+        self,
+        session_id: str,
+        check_matched_start: int,
+        check_matched_end: int,
+    ) -> int: ...

@@ -731,6 +731,26 @@ class SessionController:
     # ------------------------------------------------------------------
     #  Internal
     # ------------------------------------------------------------------
+    def _generate_global_ids(self,edit: ContextManagementEditsParams) -> list[int]:
+        callback_name = f"get_global_block_id_by_session"
+        fn = self._registry.get(callback_name)
+        if fn is None:
+            logger.warning("No callback registered for get_global_block_id_by_session")
+            return
+        global_block_ids = fn(edit.session_id)
+
+        if len(global_block_ids) == 0:
+            logger.warning(
+                f"Could not find session {edit.session_id} with block ref record in SAM, failed to perform context management edit")
+            return
+
+        if edit.block_end > len(global_block_ids) or edit.block_start > len(global_block_ids):
+            logger.warning(f"session {edit.session_id} edit: block end {edit.block_end} or block start {edit.block_start} "
+                           f"is out of index, the total kv length is {len(global_block_ids)}, fail to perform edit {edit.type}")
+
+        global_block_ids = global_block_ids[edit.block_start:edit.block_end]
+
+        return global_block_ids
 
     def _execute_single_edit(
         self,
@@ -745,38 +765,24 @@ class SessionController:
                 edit.type, edit)
             return
 
-        block_ids = list(range(edit.block_start, edit.block_end))
-        if not block_ids:
-            return
-
         logger.info(
-            "Executing edit type=%s for session %s on blocks %s "
+            "Executing edit type=%s for session %s"
             "(block_start=%d, block_end=%d).",
-            edit.type, session_id, block_ids, edit.block_start, edit.block_end)
+            edit.type, session_id, edit.block_start, edit.block_end)
 
-        callback_name = f"get_global_block_id_by_session"
-        fn = self._registry.get(callback_name)
-        if fn is None:
-            logger.warning("No callback registered for get_global_block_id_by_session")
-            return
-        global_block_ids = fn(session_id)
-
-        if len(global_block_ids) == 0:
-            logger.warning(f"Could not find session {session_id} with block ref record in SAM, failed to perform context management edit")
-            return
-
-        if edit.block_end > len(global_block_ids) or edit.block_start > len(global_block_ids):
-            logger.warning(f"session {session_id} edit: block end {edit.block_end} or block start {edit.block_start} "
-                           f"is out of index, the total kv length is {len(global_block_ids)}, fail to perform edit {edit.type}")
-
-        global_block_ids = global_block_ids[edit.block_start:edit.block_end]
         callback_name = f"execute_{edit.type}"
         fn = self._registry.get(callback_name)
         if fn is None:
             logger.warning("No callback registered for edit type: %s, skipping.", edit.type)
             return
 
-        fn(global_block_ids, session_id)
+        if edit.type == "evict":
+            global_block_ids = self._generate_global_ids(edit)
+            fn(session_id, global_block_ids)
+        elif edit.type == "prefetch":
+            fn(session_id, edit.block_start, edit.block_end)
+        else:
+            fn(session_id)
 
 
 def compute_ephemeral_range(
