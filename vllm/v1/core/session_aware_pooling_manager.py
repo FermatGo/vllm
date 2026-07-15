@@ -86,6 +86,7 @@ class SessionKeyTracker:
                 if key not in self._key_sessions:
                     self._key_sessions[key] = set()
                 self._key_sessions[key].add(session_id)
+                logger.info(f"SessionKeyTracker: add blocks: session_id: {session_id},  keys: {keys}, block_hashes: {block_hashes}")
 
     def remove_session(self, session_id: str) -> list[str]:
         """Session 被清理时移除所有 key 关联。
@@ -101,6 +102,7 @@ class SessionKeyTracker:
                         # 无其他 session 引用，该 key 不再需要 Keep-Alive
                         self._key_sessions.pop(key, None)
                         orphaned_keys.append(key)
+            logger.info(f"SessionKeyTracker: remove session: session_id: {session_id},  remove keys: {orphaned_keys}")
             return orphaned_keys
 
     def remove_keys(self, session_id: str, keys: list[str]) -> list[str]:
@@ -117,6 +119,7 @@ class SessionKeyTracker:
                     if not self._key_sessions[key]:
                         self._key_sessions.pop(key, None)
                         orphaned_keys.append(key)
+            logger.info(f"SessionKeyTracker: remove keys: {orphaned_keys}")
             return orphaned_keys
 
     def get_active_keys(
@@ -135,6 +138,7 @@ class SessionKeyTracker:
             else:
                 all_keys = set(self._key_sessions.keys())
             result = list(all_keys)
+            logger.info(f"SessionKeyTracker: active keys: {result}")
             return result
 
     def get_session_keys(self, session_id: str) -> list[str]:
@@ -179,7 +183,8 @@ class KVCacheKeepAliveThread(threading.Thread):
                     continue
                 for i in range(0, len(keys), self.max_keys):
                     batch = keys[i:i+self.max_keys]
-                    self.connector.look_up_keys(batch)
+                    res = self.connector.look_up_keys(batch)
+                    logger.info(f"Keep-alive thread return: {res}")
             except Exception as e:
                 logger.error("Keep-alive thread error: %s", e)
 
@@ -232,11 +237,13 @@ class SessionAwarePoolingManager(SessionEventListener):
                 max_keys_per_cycle=self.config.max_keys_per_cycle,
             )
             self.keep_alive_thread.start()
+            logger.info("Keep-alive thread start.")
 
     def stop(self) -> None:
         """停止 Keep-Alive 线程"""
         if self.keep_alive_thread is not None:
             self.keep_alive_thread.stop()
+            logger.info("Keep-alive thread stop.")
 
     # --- SessionEventListener 实现 ---
 
@@ -245,16 +252,17 @@ class SessionAwarePoolingManager(SessionEventListener):
         # key_tracker 按需初始化，无需预分配
         return
 
-    def on_session_blocks_allocated(
-        self,
-        session_id: str,
-        block_ids: list[int],
-        pool_keys: list[str],
-        block_hashes: list[str],
-    ) -> None:
-        """block 被分配且 KV cache 被写入远端后记录 PoolKey"""
-        if pool_keys:
-            self.key_tracker.add_keys(session_id, pool_keys, block_hashes)
+    # 可以通过ascend的pool_worker的回调函数来调用key_tracker.add_keys
+    # def on_session_blocks_allocated(
+    #     self,
+    #     session_id: str,
+    #     block_ids: list[int],
+    #     pool_keys: list[str],
+    #     block_hashes: list[str],
+    # ) -> None:
+    #     """block 被分配且 KV cache 被写入远端后记录 PoolKey"""
+    #     if pool_keys:
+    #         self.key_tracker.add_keys(session_id, pool_keys, block_hashes)
 
     def on_session_cache_hit(
         self,
@@ -337,6 +345,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         )
         if len(self._prefetch_queue) < self.config.prefetch_max_queue_size:
             self._prefetch_queue.append(request)
+            logger.info(f"SessionAwarePoolingManager on_context_management_prefetch: _prefetch_queue added PrefetchRequest: {PrefetchRequest}")
             return True
         else:
             logger.warning(f"prefetch queue is reaching the max queue size {self.config.prefetch_max_queue_size} "
