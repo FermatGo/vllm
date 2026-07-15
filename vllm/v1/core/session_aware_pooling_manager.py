@@ -6,7 +6,7 @@ import threading
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.session_event_listener import SessionEventListener
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
 
 logger = init_logger(__name__)
 
@@ -33,7 +33,7 @@ class PrefetchRequest:
     """预取请求描述"""
     session_id: str
     request_id: str              # 关联的请求 ID
-    block_hashes: list[BlockHash]      # 需要预取的 block hash 列表
+    block_hashes: list[BlockHashWithGroupId]      # 需要预取的 block hash 列表
     pool_keys: list[str]        # 对应的 PoolKey 列表
     token_len: int               # 需要预取的 token 数量
     created_at: float            # 创建时间
@@ -62,8 +62,10 @@ class SessionKeyTracker:
             with SessionKeyTracker._instance_lock:
                 if not hasattr(SessionKeyTracker, "_instance"):
                     SessionKeyTracker._instance = object.__new__(cls)
-                    # session_id → {PoolKey string → block_hash}
-                    SessionKeyTracker._instance._session_keys: dict[str, dict[str, str]] = {}
+                    # session_id → {PoolKey → block_hash}
+                    SessionKeyTracker._instance._session_keys: dict[str, dict[str, BlockHashWithGroupId]] = {}
+                    # # 反向索引session_id → {block_hash → PoolKey}
+                    SessionKeyTracker._instance._session_hashs: dict[str, dict[BlockHashWithGroupId, str]] = {}
                     # 反向索引：PoolKey string → {session_id}
                     SessionKeyTracker._instance._key_sessions: dict[str, set[str]] = {}
                     SessionKeyTracker._instance._lock = threading.Lock()
@@ -73,7 +75,7 @@ class SessionKeyTracker:
         self,
         session_id: str,
         keys: list[str],
-        block_hashes: list[str],
+        block_hashes: list[BlockHashWithGroupId],
     ) -> None:
         """Session 的 KV cache 被 put 到远端时记录。
         幂等调用：如果 key 已存在，仅更新反向索引。
@@ -81,8 +83,10 @@ class SessionKeyTracker:
         with self._lock:
             if session_id not in self._session_keys:
                 self._session_keys[session_id] = {}
+                self._session_hashs[session_id] = {}
             for key, bh in zip(keys, block_hashes):
                 self._session_keys[session_id][key] = bh
+                self._session_hashs[session_id][bh] = key
                 if key not in self._key_sessions:
                     self._key_sessions[key] = set()
                 self._key_sessions[key].add(session_id)
@@ -94,6 +98,7 @@ class SessionKeyTracker:
         """
         with self._lock:
             session_keys = self._session_keys.pop(session_id, {})
+            self._session_hashs.pop(session_id, {})
             orphaned_keys = []
             for key in session_keys:
                 if session_id in self._key_sessions.get(key, set()):
@@ -104,6 +109,14 @@ class SessionKeyTracker:
                         orphaned_keys.append(key)
             logger.info(f"SessionKeyTracker: remove session: session_id: {session_id},  remove keys: {orphaned_keys}")
             return orphaned_keys
+    
+    def get_key_by_block_hash(self, session_id, block_hash: BlockHashWithGroupId) -> str:
+        """根据session_id从block_hash反查pool_key。
+        """
+        with self._lock:
+            pool_key = self._session_hashs[session_id].get(block_hash, None)
+        return pool_key
+
 
     def remove_keys(self, session_id: str, keys: list[str]) -> list[str]:
         """移除 session 对特定 key 的关联（用于部分驱逐）。
@@ -113,7 +126,8 @@ class SessionKeyTracker:
             orphaned_keys = []
             for key in keys:
                 if session_id in self._session_keys:
-                    self._session_keys[session_id].pop(key, None)
+                    bh = self._session_keys[session_id].pop(key, None)
+                    self._session_hashs[session_id].pop(bh, None)
                 if key in self._key_sessions:
                     self._key_sessions[key].discard(session_id)
                     if not self._key_sessions[key]:
@@ -258,35 +272,41 @@ class SessionAwarePoolingManager(SessionEventListener):
         session_id: str,
         block_ids: list[int],
         pool_keys: list[str],
-        block_hashes: list[str],
+        block_hashes: list[BlockHashWithGroupId],
     ) -> None:
         """block 被分配且 KV cache 被写入远端后记录 PoolKey"""
-        if pool_keys:
-            self.key_tracker.add_keys(session_id, pool_keys, block_hashes)
+        pass
 
     def on_session_cache_hit(
         self,
         session_id: str,
         block_id: int,
-        pool_key: str | None,
-        block_hash: str,
+        # pool_key: str | None,
+        block_hash: BlockHashWithGroupId | None,
     ) -> None:
         """prefix cache 命中时记录 PoolKey（幂等）"""
-        if pool_key is not None:
-            self.key_tracker.add_keys(session_id, [pool_key], [block_hash])
+        if block_hash is not None:
+            pool_key = self.key_tracker.get_key_by_block_hash(session_id, block_hash)
+            if pool_key is not None:
+                self.key_tracker.add_keys(session_id, [pool_key], [block_hash])
 
-    def on_session_ttl_expired(self, session_id: str, block_ids: list[int]) -> None:
+    def on_session_ttl_expired(self, session_id: str, block_ids: list[int], block_hashs: list[BlockHashWithGroupId]) -> None:
         """TTL 到期时检查远端 KV cache 是否需驱逐"""
         if not self.config.enable_eviction:
             return
         # TTL 到期的 block 可能对应的 PoolKey 仍有其他 session 引用
         # 需检查每个 block 对应的 PoolKey
-        for block_id in block_ids:
-            pool_keys = self._get_block_pool_keys(block_id)
-            for key in pool_keys:
-                remaining = self.key_tracker.get_key_sessions(key)
-                if not remaining:
-                    self._mark_for_eviction(session_id, [key], is_partial=True)
+        # for block_id in block_ids:
+        #     pool_keys = self._get_block_pool_keys(block_id)
+        #     for key in pool_keys:
+        #         remaining = self.key_tracker.get_key_sessions(key)
+        #         if not remaining:
+        #             self._mark_for_eviction(session_id, [key], is_partial=True)
+        for block_hash in block_hashs:
+            pool_key = self.key_tracker.get_key_by_block_hash(session_id, block_hash)
+            remaining = self.key_tracker.get_key_sessions(pool_key)
+            if not remaining:
+                self._mark_for_eviction(session_id, [pool_key], is_partial=True)
 
     def on_session_freed(self, session_id: str) -> None:
         """Session 被清理时移除所有 PoolKey 关联并标记驱逐"""
@@ -302,10 +322,11 @@ class SessionAwarePoolingManager(SessionEventListener):
         self,
         session_id: str,
         block_ids: list[int],
-        pool_keys: list[str],
+        # pool_keys: list[str],
+        block_hashes: list[BlockHashWithGroupId],
     ) -> None:
         """evict 操作时移除部分 PoolKey 关联"""
-        if pool_keys:
+        if block_hashes:
             orphaned_keys = self.key_tracker.remove_keys(session_id, pool_keys)
             if orphaned_keys and self.config.enable_eviction:
                 self._mark_for_eviction(
@@ -319,7 +340,7 @@ class SessionAwarePoolingManager(SessionEventListener):
     def on_context_management_prefetch(
         self,
         session_id: str,
-        block_hashes: list[BlockHash],
+        block_hashes: list[BlockHashWithGroupId],
         block_ids: list[int]
     ) -> bool:
         """prefetch 操作时创建预取请求"""
@@ -354,7 +375,7 @@ class SessionAwarePoolingManager(SessionEventListener):
 
     # --- 调度循环集成 ---
 
-    def _lookup_remote_cache(self, block_hashes: list[BlockHash], token_len: int) -> int:
+    def _lookup_remote_cache(self, block_hashes: list[BlockHashWithGroupId], token_len: int) -> int:
         res = self.connector.connector_scheduler.client.lookup(
             token_len=token_len,
             block_hashes=block_hashes,
