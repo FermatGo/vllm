@@ -6,7 +6,7 @@ import threading
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.session_event_listener import SessionEventListener
-from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashWithGroupId
 
 logger = init_logger(__name__)
 
@@ -109,7 +109,7 @@ class SessionKeyTracker:
                         orphaned_keys.append(key)
             logger.info(f"SessionKeyTracker: remove session: session_id: {session_id},  remove keys: {orphaned_keys}")
             return orphaned_keys
-    
+
     def get_key_by_block_hash(self, session_id, block_hash: BlockHashWithGroupId) -> str:
         """根据session_id从block_hash反查pool_key。
         """
@@ -345,21 +345,22 @@ class SessionAwarePoolingManager(SessionEventListener):
     def on_context_management_prefetch(
         self,
         session_id: str,
-        block_hashes: list[BlockHashWithGroupId],
+        logical_block_start: int,
+        logical_block_end: int,
         block_ids: list[int]
     ) -> bool:
         """prefetch 操作时创建预取请求"""
         if not self.config.enable_prefetch:
             return
         token_len = len(block_ids) * self.block_size
+        block_hashes = self.key_tracker.get_session_block_hashes(session_id)[logical_block_start:logical_block_end]
         logger.info(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
                     f"token_len {token_len} block_ids {block_ids}")
         #预取需要的参数：Pool keys, block hash以及HBM上的block id
         #TODO: 预取请求分配block ids
         #TODO: 传入参数对齐，需要block hash
         #TODO: 计算token len？如何获取 1. blocksize * block数 2. pymotor传入解析
-        
-        pool_keys = self.key_tracker.get_session_keys(session_id)
+        pool_keys = self.key_tracker.get_session_keys(session_id)[logical_block_start:logical_block_end]
         request = PrefetchRequest(
             session_id=session_id,
             request_id=f"__prefetch_{session_id}_{time.monotonic():.0f}",
@@ -380,8 +381,19 @@ class SessionAwarePoolingManager(SessionEventListener):
             return False
 
     # --- 调度循环集成 ---
+    def on_check_matched_token(
+        self,
+        session_id: str,
+        check_matched_start: int,
+        check_matched_end: int,
+    ) -> int:
+        matched_token = 0
+        if check_matched_end < len(self.key_tracker.get_session_block_hashes(session_id)):
+            block_hashes = self.key_tracker.get_session_block_hashes(session_id)[check_matched_start:check_matched_end]
+            matched_token = self._lookup_remote_cache(block_hashes, len(block_hashes)*self.block_size)
+        return matched_token
 
-    def _lookup_remote_cache(self, block_hashes: list[BlockHashWithGroupId], token_len: int) -> int:
+    def _lookup_remote_cache(self, block_hashes: list[BlockHash], token_len: int) -> int:
         res = self.connector.connector_scheduler.client.lookup(
             token_len=token_len,
             block_hashes=block_hashes,
