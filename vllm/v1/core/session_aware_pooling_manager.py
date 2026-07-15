@@ -327,6 +327,11 @@ class SessionAwarePoolingManager(SessionEventListener):
     ) -> None:
         """evict 操作时移除部分 PoolKey 关联"""
         if block_hashes:
+            pool_keys = []
+            for block_hash in block_hashes:
+                pool_key = self.key_tracker.get_key_by_block_hash(session_id, block_hash)
+                if pool_key is not None:
+                    pool_keys.add(pool_key)
             orphaned_keys = self.key_tracker.remove_keys(session_id, pool_keys)
             if orphaned_keys and self.config.enable_eviction:
                 self._mark_for_eviction(
@@ -353,6 +358,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         #TODO: 预取请求分配block ids
         #TODO: 传入参数对齐，需要block hash
         #TODO: 计算token len？如何获取 1. blocksize * block数 2. pymotor传入解析
+        
         pool_keys = self.key_tracker.get_session_keys(session_id)
         request = PrefetchRequest(
             session_id=session_id,
