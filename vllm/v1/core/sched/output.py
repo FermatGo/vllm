@@ -47,7 +47,7 @@ class NewRequestData:
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
-        prefill_token_ids: list[int] | None = None,
+        prefill_token_ids: list[int] | None = None
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,

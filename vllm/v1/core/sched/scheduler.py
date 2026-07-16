@@ -40,6 +40,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.session_aware_manager import SessionAwareManager
+from vllm.v1.core.session_aware_pooling_manager import SessionAwarePoolingManager
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -301,10 +302,19 @@ class Scheduler(SchedulerInterface):
         self._pause_state: PauseState = PauseState.UNPAUSED
 
         self.session_aware_manager = SessionAwareManager(self.kv_cache_manager)
+        self.session_pooling_manager = None
+        if self.connector is None:
+            logger.warning(f"scheduler does not have connector, failed to init SPM")
+        else:
+            self.session_pooling_manager = SessionAwarePoolingManager(self.session_aware_manager, self.connector)
+            self.session_pooling_manager.start()
+            logger.info("Init session pooling manager")
+
         self.kv_cache_manager.set_session_event_callbacks(
             on_blocks_allocated=self.session_aware_manager.on_blocks_allocated_for_request,
             on_block_cache_hit=self.session_aware_manager.on_block_cache_hit_for_request,
         )
+
 
     def _mamba_block_aligned_split(
         self,
@@ -990,6 +1000,9 @@ class Scheduler(SchedulerInterface):
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
+        if self.session_pooling_manager is not None:
+            self.session_pooling_manager.process_prefetch_queue(self)
+
         if self.connector is not None:
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
@@ -2047,6 +2060,8 @@ class Scheduler(SchedulerInterface):
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
+        if self.session_pooling_manager is not None:
+            self.session_pooling_manager.stop()
 
     ########################################################################
     # KV Connector Related Methods
