@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import CacheControlParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager, KVCacheBlocks
 from vllm.v1.core.session_event_listener import SessionEventListener
 from vllm.v1.engine import ContextManagementEditsParams, ContextManagementParams
+from vllm.v1.core.kv_cache_utils import BlockHash, get_block_hash
 
 
 logger = init_logger(__name__)
@@ -189,9 +190,9 @@ class SessionAwareManager:
 
         # cache hit 的 block 应当已经是完整且具有 hash 的 cached block。
         block = self.kv_cache_manager.block_pool.blocks[block_id]
-        block_hash_with_group_id = block.block_hash
+        block_hash = get_block_hash(block.block_hash)
 
-        if block_hash_with_group_id is None:
+        if block_hash is None:
             logger.warning(
                 "Cache-hit block %s has no block hash; "
                 "skip session_cache_hit notification",
@@ -203,7 +204,7 @@ class SessionAwareManager:
             "session_cache_hit",
             session_id=session_id,
             block_id=block_id,
-            block_hash=block_hash_with_group_id,
+            block_hash=block_hash,
         )
     
     def _on_ttl_expired(self, block_id: int, session_id: str) -> None:
@@ -227,14 +228,14 @@ class SessionAwareManager:
         )
 
         block = self.kv_cache_manager.block_pool.blocks[block_id]
-        block_hash_with_group_id = block.block_hash
+        block_hash = get_block_hash(block.block_hash)
 
         # SAM 状态修改完成后再通知 SPM。
         self._notify_event(
             "session_ttl_expired",
             session_id=[session_id],
             block_ids=[block_id],
-            block_hash=[block_hash_with_group_id],
+            block_hash=[block_hash],
         )
 
     def _ensure_session_registered(self, session_id: str, parent_session_id: str) -> None:
@@ -375,7 +376,7 @@ class SessionAwareManager:
         清除本地引用，并通知 SPM 停止对应远端 PoolKey 的 Keep-Alive
         """
         affected_block_ids: list[int] = []
-        affected_block_hashes: list[str] = []
+        affected_block_hashes: list[BlockHash] = []
 
         for block_id in block_ids:
             record = self._block_sessions.get(block_id, {}).get(session_id)
@@ -391,7 +392,7 @@ class SessionAwareManager:
                 delta_ref=-1,
                 ttl_expire_at=0.0,
             )
-            block_hash = self.kv_cache_manager.block_pool.blocks[block_id].block_hash
+            block_hash = get_block_hash(self.kv_cache_manager.block_pool.blocks[block_id].block_hash)
             affected_block_hashes.append(block_hash)
             affected_block_ids.append(block_id)
 
