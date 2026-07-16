@@ -393,7 +393,9 @@ class Scheduler(SchedulerInterface):
     #     return free_result
 
     def process_prefetch_req(self):
+        stop_idx = 0
         for i in range(0, len(self.session_pooling_manager._prefetch_queue)):
+            stop_idx = i
             try:
                 tmp_prefetch_req = self.session_pooling_manager._prefetch_queue[i]
                 matched_tokens = self.session_pooling_manager._lookup_remote_cache(
@@ -420,7 +422,7 @@ class Scheduler(SchedulerInterface):
                 logger.error("Prefetch failed for request %s: %s",
                              tmp_prefetch_req.request_id, e)
         # update prefetch queue
-        self.session_pooling_manager._prefetch_queue = self.session_pooling_manager._prefetch_queue[i:]
+        self.session_pooling_manager._prefetch_queue = self.session_pooling_manager._prefetch_queue[stop_idx:]
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
