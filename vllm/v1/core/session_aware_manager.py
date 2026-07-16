@@ -396,6 +396,8 @@ class SessionAwareManager:
             affected_block_ids.append(block_id)
 
         if affected_block_ids:
+            logger.warning(
+                f"sending param to context_management_evict session_id {session_id} block_ids {affected_block_ids} block_hashes {affected_block_hashes}")
             self._notify_event(
                 "context_management_evict",
                 session_id=session_id,
@@ -789,21 +791,21 @@ class SessionController:
     # ------------------------------------------------------------------
     #  Internal
     # ------------------------------------------------------------------
-    def _generate_global_ids(self,edit: ContextManagementEditsParams) -> list[int]:
+    def _generate_global_ids(self, session_id: str, edit: ContextManagementEditsParams) -> list[int]:
         callback_name = f"get_global_block_id_by_session"
         fn = self._registry.get(callback_name)
         if fn is None:
             logger.warning("No callback registered for get_global_block_id_by_session")
             return
-        global_block_ids = fn(edit.session_id)
+        global_block_ids = fn(session_id)
 
         if len(global_block_ids) == 0:
             logger.warning(
-                f"Could not find session {edit.session_id} with block ref record in SAM, failed to perform context management edit")
+                f"Could not find session {session_id} with block ref record in SAM, failed to perform context management edit")
             return
 
         if edit.block_end > len(global_block_ids) or edit.block_start > len(global_block_ids):
-            logger.warning(f"session {edit.session_id} edit: block end {edit.block_end} or block start {edit.block_start} "
+            logger.warning(f"session {session_id} edit: block end {edit.block_end} or block start {edit.block_start} "
                            f"is out of index, the total kv length is {len(global_block_ids)}, fail to perform edit {edit.type}")
 
         global_block_ids = global_block_ids[edit.block_start:edit.block_end]
@@ -835,7 +837,7 @@ class SessionController:
             return
 
         if edit.type == "evict":
-            global_block_ids = self._generate_global_ids(edit)
+            global_block_ids = self._generate_global_ids(session_id, edit)
             fn(session_id, global_block_ids)
         elif edit.type == "prefetch":
             fn(session_id, edit.block_start, edit.block_end)
