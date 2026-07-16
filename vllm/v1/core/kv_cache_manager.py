@@ -223,11 +223,7 @@ class KVCacheManager:
                 preempted=request.num_preemptions > 0,
             )
 
-        kv_cache_blocks = self.create_kv_cache_blocks(computed_blocks)
-        if num_new_computed_tokens > 0 and self._on_block_cache_hit is not None:
-            self._on_block_cache_hit(request, kv_cache_blocks)
-
-        return kv_cache_blocks, num_new_computed_tokens
+        return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
     def can_fit_full_sequence(
         self,
@@ -415,6 +411,13 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
             )
+
+            if (
+                num_new_computed_tokens > 0 
+                and new_computed_blocks is not None 
+                and self._on_block_cache_hit is not None
+            ):
+                self._on_block_cache_hit(request, new_computed_blocks)
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
