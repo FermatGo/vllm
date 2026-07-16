@@ -65,10 +65,12 @@ class SessionKeyTracker:
                     SessionKeyTracker._instance = object.__new__(cls)
                     # session_id → {PoolKey → block_hash}
                     SessionKeyTracker._instance._session_keys: dict[str, dict[str, BlockHash]] = {}
-                    # # 反向索引session_id → {block_hash → PoolKey}
+                    # 反向索引session_id → {block_hash → PoolKey}
                     SessionKeyTracker._instance._session_hashes: dict[str, dict[BlockHash, str]] = {}
                     # 反向索引：PoolKey string → {session_id}
                     SessionKeyTracker._instance._key_sessions: dict[str, set[str]] = {}
+                    # {block_hash →PoolKey}
+                    SessionKeyTracker._instance._hash_keys: dict[BlockHash, str] = {}
                     SessionKeyTracker._instance._lock = threading.Lock()
         return SessionKeyTracker._instance
 
@@ -88,6 +90,7 @@ class SessionKeyTracker:
             for key, bh in zip(keys, block_hashes):
                 self._session_keys[session_id][key] = bh
                 self._session_hashes[session_id][bh] = key
+                self._hash_keys[bh] = key
                 if key not in self._key_sessions:
                     self._key_sessions[key] = set()
                 self._key_sessions[key].add(session_id)
@@ -111,12 +114,12 @@ class SessionKeyTracker:
             logger.info(f"SessionKeyTracker: remove session: session_id: {session_id},  remove keys: {orphaned_keys}")
             return orphaned_keys
 
-    def get_key_by_block_hash(self, session_id, block_hash: BlockHash) -> str:
+    def get_key_by_block_hash(self, block_hash: BlockHash) -> str:
         """根据session_id从block_hash反查pool_key。
         """
         with self._lock:
-            pool_key = self._session_hashes[session_id].get(block_hash, None)
-        return pool_key
+            pool_key = self._hash_keys.get(block_hash, None)
+            return pool_key
 
 
     def remove_keys(self, session_id: str, keys: list[str]) -> list[str]:
@@ -281,12 +284,6 @@ class SessionAwarePoolingManager(SessionEventListener):
         """block 被分配且 KV cache 被写入远端后记录 PoolKey"""
         pass
 
-    def find_miss_pool_key(self, block_hash: BlockHash) -> str | None:
-        for hash_key in self.key_tracker._session_hashes:
-            if block_hash in hash_key.keys():
-                return hash_key[block_hash]
-        return None
-
     def on_session_cache_hit(
         self,
         session_id: str,
@@ -296,14 +293,13 @@ class SessionAwarePoolingManager(SessionEventListener):
     ) -> None:
         """prefix cache 命中时记录 PoolKey（幂等）"""
         if block_hash is not None:
-            try:
-                pool_key = self.key_tracker.get_key_by_block_hash(session_id, block_hash)
-            except Exception as e:
-                logger.info(f"SessionAwarePoolingManager.on_session_cache_hit: get pool_key failed, {e}")
-                pool_key = self.find_miss_pool_key(block_hash)
-                if pool_key is not None:
-                   self.key_tracker.add_keys(session_id, [pool_key], [block_hash])
-                   logger.info(f"SessionAwarePoolingManager.on_session_cache_hit: use cached pool_key success")
+            pool_key = self.key_tracker.get_key_by_block_hash(block_hash)
+            block_key = self.key_tracker._session_hashes.get(session_id, None)
+            if block_key is not None:
+                key = block_key.get(block_hash, None)
+                if key is not None:
+                    return
+            self.key_tracker.add_keys(session_id, [pool_key], [block_hash])
 
     def on_session_ttl_expired(self, session_id: str, block_ids: list[int], block_hashs: list[BlockHash]) -> None:
         """TTL 到期时检查远端 KV cache 是否需驱逐"""
@@ -318,7 +314,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         #         if not remaining:
         #             self._mark_for_eviction(session_id, [key], is_partial=True)
         for block_hash in block_hashs:
-            pool_key = self.key_tracker.get_key_by_block_hash(session_id, block_hash)
+            pool_key = self.key_tracker.get_key_by_block_hash(block_hash)
             remaining = self.key_tracker.get_key_sessions(pool_key)
             if not remaining:
                 self._mark_for_eviction(session_id, [pool_key], is_partial=True)
@@ -346,7 +342,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         if block_hashes:
             pool_keys = []
             for block_hash in block_hashes:
-                pool_key = self.key_tracker.get_key_by_block_hash(session_id, block_hash)
+                pool_key = self.key_tracker.get_key_by_block_hash(block_hash)
                 if pool_key is not None:
                     pool_keys.append(pool_key)
             orphaned_keys = self.key_tracker.remove_keys(session_id, pool_keys)
