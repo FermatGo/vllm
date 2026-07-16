@@ -7,6 +7,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.session_event_listener import SessionEventListener
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -230,7 +231,10 @@ class SessionAwarePoolingManager(SessionEventListener):
         self.keep_alive_thread: KVCacheKeepAliveThread | None = None
 
         # 预取队列
-        self._prefetch_queue: list[PrefetchRequest] = []
+        self.prefetch_waiting_queue: list[PrefetchRequest] = []
+
+        # 进行预取中的队列
+        self.prefetch_running_queue: list[Request] = []
 
         # 驱逐标记队列
         self._eviction_marks: dict[str, EvictionMark] = {}
@@ -373,9 +377,9 @@ class SessionAwarePoolingManager(SessionEventListener):
             created_at=time.monotonic(),
             dest_block_ids=block_ids
         )
-        if len(self._prefetch_queue) < self.config.prefetch_max_queue_size:
-            self._prefetch_queue.append(request)
-            logger.info(f"SessionAwarePoolingManager on_context_management_prefetch: _prefetch_queue added PrefetchRequest: {PrefetchRequest}")
+        if len(self.prefetch_waiting_queue) < self.config.prefetch_max_queue_size:
+            self.prefetch_waiting_queue.append(request)
+            logger.info(f"SessionAwarePoolingManager on_context_management_prefetch: prefetch_waiting_queue added PrefetchRequest: {PrefetchRequest}")
             return True
         else:
             logger.warning(f"prefetch queue is reaching the max queue size {self.config.prefetch_max_queue_size} "
@@ -424,16 +428,16 @@ class SessionAwarePoolingManager(SessionEventListener):
     def process_prefetch_queue(self) -> list[PrefetchRequest]:
         """在 Scheduler 调度循环中处理预取请求"""
 
-        if not self._prefetch_queue:
+        if not self.prefetch_waiting_queue:
             return []
 
         # 按 priority 排序（0=最高优先）
-        # self._prefetch_queue.sort(key=lambda r: r.priority)
+        # self.prefetch_waiting_queue.sort(key=lambda r: r.priority)
 
         completed = []
         remaining = []
 
-        for prefetch_req in self._prefetch_queue:
+        for prefetch_req in self.prefetch_waiting_queue:
             # 1. 检查预取请求是否仍然有效
             if prefetch_req.session_id not in self.sam._sessions:
                 continue  # session 已不存在，跳过
@@ -458,7 +462,7 @@ class SessionAwarePoolingManager(SessionEventListener):
                             prefetch_req.session_id, e)
                 remaining.append(prefetch_req)
 
-        self._prefetch_queue = remaining
+        self.prefetch_waiting_queue = remaining
         return completed
 
     def process_eviction_marks(self, now: float | None = None) -> None:
