@@ -71,16 +71,16 @@ class SessionAwareManager:
         self._event_listeners: list[SessionEventListener] = []
 
     def on_block_cache_hit_for_request(
-        self, 
+        self,
         request: Request,
         blocks: KVCacheBlocks
     ) -> None:
         for group in blocks.get_block_ids():
             for block_id in group:
-                self.on_block_cache_hit(request.session_id, block_id)    
+                self.on_block_cache_hit(request.session_id, block_id)
 
     def on_blocks_allocated_for_request(
-        self, 
+        self,
         request: Request,
         blocks: KVCacheBlocks
     ) -> None:
@@ -95,7 +95,7 @@ class SessionAwareManager:
             block_ids=block_ids,
             ephemeral_range=compute_ephemeral_range(request.cache_control),
         )
-    
+
     def on_blocks_allocated(
         self,
         session_id: str | None,
@@ -206,7 +206,7 @@ class SessionAwareManager:
             block_id=block_id,
             block_hash=block_hash,
         )
-    
+
     def _on_ttl_expired(self, block_id: int, session_id: str) -> None:
         """ephemeral block TTL 到期回调"""
         logger.info(f"working on _on_ttl_expired in SAM for block {block_id} and session id {session_id}")
@@ -255,7 +255,7 @@ class SessionAwareManager:
         if block_id in self._block_sessions:
             for session_id in list(self._block_sessions[block_id].keys()):
                 self._remove_session_block_ref(session_id, block_id)
-    
+
     def _add_session_block_ref(self, record: SessionBlockRecord) -> None:
         """添加 session 对 block 的引用（SAM 内部）"""
         self._session_blocks.setdefault(record.session_id, {})[record.block_id] = record
@@ -267,7 +267,7 @@ class SessionAwareManager:
             session_id in self._session_blocks and
             block_id in self._session_blocks[session_id]
         )
-    
+
     def _remove_session_block_ref(self, session_id: str, block_id: int) -> None:
         """移除 session 对 block 的引用（SAM 内部）"""
         if session_id in self._session_blocks:
@@ -339,10 +339,10 @@ class SessionAwareManager:
             "orphaned_blocks": result["orphaned_blocks"],
             "children_freed": children_freed,
         }
-    
+
     # def _mark_block_hash_evictable(self, block_id: int) -> None:
         # """标记 block hash 可被惰性清除（SAM 内部）"""
-    
+
     def _execute_offload(self, block_ids: list[int], session_id: str) -> None:
         """卸载指定范围的 block — 减少 session 引用 + 清除当前session的TTL（通知TTLManager）"""
         for block_id in block_ids:
@@ -350,8 +350,8 @@ class SessionAwareManager:
             self.kv_cache_manager.update_block_meta(block_id, delta_ref=-1)
 
     def _execute_prefetch(
-            self, 
-            session_id: str,         
+            self,
+            session_id: str,
             logical_block_start: int,
             logical_block_end: int,
         ) -> None:
@@ -427,7 +427,7 @@ class SessionAwareManager:
                     listener,
                     event_type,
                 )
-    
+
 
 @dataclass
 class TTLBlockEntry:
@@ -795,15 +795,16 @@ class SessionController:
     def _generate_global_ids(self, session_id: str, edit: ContextManagementEditsParams) -> list[int]:
         callback_name = f"get_global_block_id_by_session"
         fn = self._registry.get(callback_name)
+        global_block_ids = []
         if fn is None:
             logger.warning("No callback registered for get_global_block_id_by_session")
-            return
+            return global_block_ids
         global_block_ids = fn(session_id)
 
         if len(global_block_ids) == 0:
             logger.warning(
                 f"Could not find session {session_id} with block ref record in SAM, failed to perform context management edit")
-            return
+            return global_block_ids
 
         if edit.block_end > len(global_block_ids) or edit.block_start > len(global_block_ids):
             logger.warning(f"session {session_id} edit: block end {edit.block_end} or block start {edit.block_start} "
@@ -839,6 +840,8 @@ class SessionController:
 
         if edit.type == "evict":
             global_block_ids = self._generate_global_ids(session_id, edit)
+            if len(global_block_ids) == 0:
+                return
             fn(session_id, global_block_ids)
         elif edit.type == "prefetch":
             fn(session_id, edit.block_start, edit.block_end)
