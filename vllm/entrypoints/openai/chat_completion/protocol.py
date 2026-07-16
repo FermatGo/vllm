@@ -878,14 +878,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def _validate_agent_hint(self) -> "ChatCompletionRequest":
         if self.agent_hint is None:
             return self
+        else:
+            if not self.agent_hint.session_id:
+                logger.warning(f'session_id is empty, set agent_hint None')
+                self.agent_hint = None
+                return self
 
-        # cache_control.ttl > 0 时，session_id 建议提供
-        if (self.agent_hint.cache_control is not None
-                and self.agent_hint.cache_control.ttl > 0
-                and self.agent_hint.session_id is None):
-            # TTL无session_id时仅对当前请求生效（等价于全局临时保留）
-            # 不报错，但ttl效果可能不如预期
-            pass
         return self
 
 
