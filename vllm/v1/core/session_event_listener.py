@@ -1,5 +1,5 @@
 from typing import Protocol
-from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 
 class SessionEventListener(Protocol):
@@ -14,7 +14,7 @@ class SessionEventListener(Protocol):
         session_id: str,
         block_ids: list[int],
         pool_keys: list[str],       # 远端 PoolKey 列表（来自 AscendStoreConnector）
-        block_hashes: list[BlockHashWithGroupId],    # 对应的 block hash
+        block_hashes: list[BlockHash],    # 对应的 block hash
     ) -> None: ...
 
     def on_session_cache_hit(
@@ -22,11 +22,11 @@ class SessionEventListener(Protocol):
         session_id: str,
         block_id: int,
         # pool_key: str | None,      # cache hit 的 block 对应的远端 PoolKey（可能无）
-        block_hash: BlockHashWithGroupId | None,
+        block_hash: BlockHash | None,
     ) -> None: ...
 
     def on_session_ttl_expired(
-        self, session_id: str, block_ids: list[int], block_hash: BlockHashWithGroupId | None,
+        self, session_id: str, block_ids: list[int], block_hash: BlockHash | None,
     ) -> None: ...
 
     def on_session_freed(self, session_id: str) -> None: ...
@@ -45,7 +45,7 @@ class SessionEventListener(Protocol):
     def on_context_management_prefetch(
         self,
         session_id: str,
-        block_hashes: list[BlockHashWithGroupId],
+        block_hashes: list[BlockHash],
         token_len: int,
     ) -> None: ...
 
