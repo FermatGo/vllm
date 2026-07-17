@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from vllm.v1.core.agentic_session_controller import SessionController
+from vllm.v1.core.session_aware_manager import SessionController
 from vllm.v1.engine import ContextManagementEditsParams, ContextManagementParams
 
 pytestmark = pytest.mark.cpu_test

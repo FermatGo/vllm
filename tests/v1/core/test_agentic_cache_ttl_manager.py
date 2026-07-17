@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from vllm.v1.core.agentic_cache_ttl_manager import (
+from vllm.v1.core.session_aware_manager import (
     TTLBlockEntry,
     TTLTimerWheel,
     TTLManager,
