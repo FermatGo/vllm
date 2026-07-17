@@ -45,6 +45,8 @@ class EphemeralRange:
 class SessionAwareManager:
     """Session-Aware Manager — 管理 session 生命周期与 block 映射"""
 
+    # TODO：是否已实现分配的时候有ttl才保护
+    # TODO：没空间是C区可开放，远程保持访问、保护
     def __init__(self, kv_cache_manager: KVCacheManager):
         self.kv_cache_manager = kv_cache_manager
 
@@ -363,7 +365,6 @@ class SessionAwareManager:
             logical_block_start=logical_block_start,
             logical_block_end=logical_block_end,
         )
-        #TODO: 分配block 调用SPM notify
 
     def _get_session_global_block_ids(self, session_id: str) -> list[int]:
         blocks_result = []
@@ -395,7 +396,7 @@ class SessionAwareManager:
             block_hash = get_block_hash(self.kv_cache_manager.block_pool.blocks[block_id].block_hash)
             affected_block_hashes.append(block_hash)
             affected_block_ids.append(block_id)
-
+        #TODO: session引用是否清零
         if affected_block_ids:
             logger.warning(
                 f"sending param to context_management_evict session_id {session_id} block_ids {affected_block_ids} block_hashes {affected_block_hashes}")
@@ -620,7 +621,6 @@ class TTLManager:
 
         同时从 ``_entries`` 和 timer wheel 中删除。如果不存在则静默忽略。
         """
-        #TODO: 联调时确保，对于某个block_id的不同操作，记录的key值是一致的
         key = (block_id, session_id)
         if key in self._entries:
             entry = self._entries.pop(key)
@@ -652,6 +652,7 @@ def example_expired_callback(block_id: int, session_id: str) -> None:
     logger.info(f"block_id {block_id} and session_id {session_id} is processing on TTL expiration")
 
 class SessionController:
+    #TODO: 考虑预取请求有content / session已被清理，重新计算hash
     """Context management edits 执行器。
 
     处理请求携带的 context_management.edits，根据
