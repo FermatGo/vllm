@@ -9,33 +9,28 @@ class SessionEventListener(Protocol):
         self, session_id: str, parent_session_id: str | None
     ) -> None: ...
 
-    def on_session_blocks_allocated(
+    def on_session_blocks_protected(
         self,
-        session_id: str,
-        block_ids: list[int],
-        pool_keys: list[str],       # 远端 PoolKey 列表（来自 AscendStoreConnector）
-        block_hashes: list[BlockHash],    # 对应的 block hash
+        block_hashes: list[BlockHash],
+    ) -> None: ...
+
+    def on_session_blocks_removed(
+        self,
+        block_hashes: list[BlockHash],
     ) -> None: ...
 
     def on_session_cache_hit(
         self,
-        session_id: str,
-        block_id: int,
-        # pool_key: str | None,      # cache hit 的 block 对应的远端 PoolKey（可能无）
-        block_hash: BlockHash | None,
+        block_hashes: list[BlockHash],
     ) -> None: ...
 
-    def on_session_ttl_expired(
-        self, session_id: str, block_ids: list[int], block_hash: BlockHash | None,
-    ) -> None: ...
+    def on_session_ttl_expired(self, block_hashs: list[BlockHash]) -> None: ...
 
     def on_session_freed(self, session_id: str) -> None: ...
 
     def on_context_management_evict(
         self,
-        session_id: str,
-        block_ids: list[int],
-        pool_keys: list[str],      # 被驱逐 block 对应的远端 PoolKey
+        block_hashes: list[BlockHash],
     ) -> None: ...
 
     def on_context_management_offload(
@@ -46,8 +41,7 @@ class SessionEventListener(Protocol):
         self,
         session_id: str,
         block_hashes: list[BlockHash],
-        token_len: int,
-    ) -> None: ...
+    ) -> bool: ...
 
     def on_check_matched_token(
         self,
