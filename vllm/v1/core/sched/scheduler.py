@@ -62,6 +62,7 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
+from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 
@@ -411,21 +412,30 @@ class Scheduler(SchedulerInterface):
                     block_hashes=tmp_prefetch_req.block_hashes,
                     token_len=tmp_prefetch_req.token_len,
                 )
-                logger.info(f"processing prefetch request {tmp_prefetch_req.request_id} session_id {tmp_prefetch_req.session_id}")
+                logger.info(
+                    f"processing prefetch request {tmp_prefetch_req.request_id} session_id {tmp_prefetch_req.session_id} matched_tokens {matched_tokens}")
+
                 if matched_tokens == 0:
                     continue
 
-                tmp_req = Request(request_id=tmp_prefetch_req.request_id, session_id=tmp_prefetch_req.session_id)
+                tmp_req = Request(request_id=tmp_prefetch_req.request_id,
+                                  session_id = tmp_prefetch_req.session_id,
+                                  prompt_token_ids = [0] * matched_tokens,
+                                  sampling_params = SamplingParams.from_optional(),
+                                  pooling_params = None,
+                                  is_prefetch_req = True)
+                tmp_req.block_hashes = tmp_prefetch_req.block_hashes
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     tmp_req,
-                    matched_tokens,
-                    num_external_computed_tokens=matched_tokens,
+                    matched_tokens
                 )
                 if new_blocks:
-                    tmp_prefetch_req.dest_block_ids = new_blocks.get_unhashed_block_ids
+                    tmp_prefetch_req.dest_block_ids = new_blocks.get_block_ids()[0]
                     tmp_prefetch_req.token_len = matched_tokens
                 else:
                     break
+                logger.info(f"new_blocks is {new_blocks} ids {tmp_prefetch_req.dest_block_ids}")
                 self.session_pooling_manager._submit_prefetch_to_scheduler(tmp_prefetch_req, matched_tokens)
                 self.session_pooling_manager.prefetch_running_queue.append(tmp_req)
             except Exception as e:
