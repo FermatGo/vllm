@@ -94,7 +94,7 @@ class SessionKeyTracker:
                 if key not in self._key_sessions:
                     self._key_sessions[key] = set()
                 self._key_sessions[key].add(session_id)
-                logger.info(f"SessionKeyTracker: add blocks: session_id: {session_id},  keys: {keys}, block_hashes: {block_hashes}")
+                # logger.info(f"SessionKeyTracker: add blocks: session_id: {session_id},  keys: {keys}, block_hashes: {block_hashes}")
 
     def remove_session(self, session_id: str) -> list[str]:
         """Session 被清理时移除所有 key 关联。
@@ -156,7 +156,7 @@ class SessionKeyTracker:
             else:
                 all_keys = set(self._key_sessions.keys())
             result = list(all_keys)
-            logger.info(f"SessionKeyTracker: active keys: {result}")
+            # logger.info(f"SessionKeyTracker: active keys: {result}")
             return result
 
     def get_session_keys(self, session_id: str) -> list[str]:

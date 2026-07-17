@@ -82,7 +82,8 @@ class Request:
         ttl: float | None = None,  # 请求结束后block保留时间（秒）
         cache_control: CacheControlParams | None = None,
         context_management: ContextManagementParams | None = None,
-        session_management_flag: int = 0  # 0：忽略，1：free_session
+        session_management_flag: int = 0,  # 0：忽略，1：free_session
+        is_prefetch_req: bool = False
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -106,6 +107,7 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.is_prefetch_req = is_prefetch_req
 
         if pooling_params is not None:
             # Pooling models.
@@ -131,7 +133,7 @@ class Request:
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds
-        )
+        ) if not self.is_prefetch_req else len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = (
             self.prompt_token_ids.copy()
