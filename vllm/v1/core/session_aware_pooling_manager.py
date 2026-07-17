@@ -216,7 +216,9 @@ class SessionAwarePoolingManager(SessionEventListener):
     实现 SessionEventListener 协议，注册为 SAM 的事件监听器。
     持有 SessionKeyTracker 和 KVCacheKeepAliveThread。
     """
-
+    # TODO：获取block hash，及其他meta信息计算 pool key
+    # TODO：SAM定期向SPM写入需要保护的hash，暴露增加、删除
+    # TODO：检查ttl接口是否正确
     def __init__(
         self,
         sam: SessionAwareManager,

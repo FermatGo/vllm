@@ -394,6 +394,7 @@ class Scheduler(SchedulerInterface):
 
     def process_prefetch_req(self):
         #处理上一轮次prefetch
+        # todo: 适配hbm命中 / 或者远端部分命中 更新hash和block分配
         for i in range(0, len(self.session_pooling_manager.prefetch_running_queue)):
             free_prefetch_running_req = self.session_pooling_manager.prefetch_running_queue[i]
             logger.info(f"free prefetch request {free_prefetch_running_req.request_id} and session id {free_prefetch_running_req.session_id}")
