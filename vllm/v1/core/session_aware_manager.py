@@ -230,6 +230,7 @@ class SessionAwareManager:
         )
 
         block = self.kv_cache_manager.block_pool.blocks[block_id]
+        #TODO: 检查block_hash None的原因
         if not block.block_hash:
             return
         else:
