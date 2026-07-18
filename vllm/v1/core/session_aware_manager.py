@@ -117,7 +117,7 @@ class SessionAwareManager:
 
         for idx, block_id in enumerate(block_ids):
             is_ephemeral = (
-                ephemeral_start is not None and idx >= ephemeral_start
+                ephemeral_start is not None and idx <= ephemeral_start
             )
 
             # 清零旧的 session 引用（SAM 内部）
