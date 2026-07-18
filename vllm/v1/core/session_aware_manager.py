@@ -237,7 +237,7 @@ class SessionAwareManager:
             "session_ttl_expired",
             session_id=[session_id],
             block_ids=[block_id],
-            block_hash=[block_hash],
+            block_hashs=[block_hash],
         )
 
     def _ensure_session_registered(self, session_id: str, parent_session_id: str) -> None:
