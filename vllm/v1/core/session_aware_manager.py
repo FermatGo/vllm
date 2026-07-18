@@ -230,15 +230,18 @@ class SessionAwareManager:
         )
 
         block = self.kv_cache_manager.block_pool.blocks[block_id]
-        block_hash = get_block_hash(block.block_hash)
+        if not block.block_hash:
+            return
+        else:
+            block_hash = get_block_hash(block.block_hash)
 
-        # SAM 状态修改完成后再通知 SPM。
-        self._notify_event(
-            "session_ttl_expired",
-            session_id=[session_id],
-            block_ids=[block_id],
-            block_hash=[block_hash],
-        )
+            # SAM 状态修改完成后再通知 SPM。
+            self._notify_event(
+                "session_ttl_expired",
+                session_id=[session_id],
+                block_ids=[block_id],
+                block_hash=[block_hash],
+            )
 
     def _ensure_session_registered(self, session_id: str, parent_session_id: str) -> None:
         """确保 session 已注册（SAM 内部）"""
