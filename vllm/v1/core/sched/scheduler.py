@@ -442,7 +442,7 @@ class Scheduler(SchedulerInterface):
                 logger.error("Prefetch failed for request %s: %s",
                              tmp_prefetch_req.request_id, e)
         # update prefetch queue
-        self.session_pooling_manager.prefetch_waiting_queue = self.session_pooling_manager.prefetch_waiting_queue[stop_idx:]
+        self.session_pooling_manager.prefetch_waiting_queue = self.session_pooling_manager.prefetch_waiting_queue[stop_idx+1:]
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
