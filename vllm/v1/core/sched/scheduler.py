@@ -38,6 +38,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_utils import get_block_hash
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.session_aware_pooling_manager import SessionAwarePoolingManager
@@ -378,21 +379,6 @@ class Scheduler(SchedulerInterface):
         return self.session_aware_manager._session_controller.process_request_edits(request_id, session_id, context_management)
 
 
-    # def free_session(self, session_id: str) -> dict:
-    #     """
-    #     free kv block for the session
-    #     :param session_id: str, the session is
-    #     :return: Bool
-    #     """
-    #     logger.info(f"trying to free session {session_id}")
-    #     free_result = self.kv_cache_manager.free_session_tree(session_id)
-    #
-    #     logger.warning(f"===== free_session, free_result = {free_result}")
-    #
-    #     logger.info(f"free sesssion {session_id} kv with freed_blocks {free_result['freed_blocks']} and "
-    #                 f"orphaned_blocks {free_result['orphaned_blocks']}")
-    #     return free_result
-
     def process_prefetch_req(self):
         #处理上一轮次prefetch
         # todo: 适配hbm命中 / 或者远端部分命中 更新hash和block分配
@@ -408,35 +394,62 @@ class Scheduler(SchedulerInterface):
             stop_idx = i
             try:
                 tmp_prefetch_req = self.session_pooling_manager.prefetch_waiting_queue[i]
-                matched_tokens = self.session_pooling_manager._lookup_remote_cache(
-                    block_hashes=tmp_prefetch_req.block_hashes,
-                    token_len=tmp_prefetch_req.token_len,
-                )
-                logger.info(
-                    f"processing prefetch request {tmp_prefetch_req.request_id} session_id {tmp_prefetch_req.session_id} matched_tokens {matched_tokens}")
+                local_hit_req = Request(request_id=tmp_prefetch_req.request_id,
+                                  session_id=tmp_prefetch_req.session_id,
+                                  prompt_token_ids=[0] * (tmp_prefetch_req.token_len+1),
+                                  sampling_params=SamplingParams.from_optional(),
+                                  pooling_params=None,
+                                  is_prefetch_req=True)
+                #检查当前预取请求HBM命中情况
+                local_hit_req.block_hashes = tmp_prefetch_req.block_hashes
+                local_blocks, local_computed_tokens = self.kv_cache_manager.get_computed_blocks(local_hit_req)
+                logger.info(f"prefetch req: local hit tokens num {local_computed_tokens} of total {tmp_prefetch_req.token_len}")
 
-                if matched_tokens == 0:
+                local_hit_block_hashes = []
+                for block_seq in local_blocks.blocks:
+                    for block in block_seq:
+                        local_hit_block_hashes.append(get_block_hash(block.block_hash))
+                remain_block_hashes = [block_hash for block_hash in tmp_prefetch_req.block_hashes
+                                       if block_hash not in local_hit_block_hashes]
+
+                #查询远端剩余hash存活情况
+                exist_external_block_hash = []
+                total_external_matched_tokens = 0
+                for hash in remain_block_hashes:
+                    matched_tokens = self.session_pooling_manager._lookup_remote_cache(
+                        block_hashes=[hash],
+                        token_len=self.block_size,
+                    )
+
+                    if matched_tokens > 0:
+                        exist_external_block_hash.append(hash)
+                        total_external_matched_tokens += matched_tokens
+                logger.info(
+                    f"processing prefetch request {tmp_prefetch_req.request_id} session_id {tmp_prefetch_req.session_id} "
+                    f"total_external_matched_tokens {total_external_matched_tokens}")
+
+                if total_external_matched_tokens == 0:
                     continue
 
                 tmp_req = Request(request_id=tmp_prefetch_req.request_id,
                                   session_id = tmp_prefetch_req.session_id,
-                                  prompt_token_ids = [0] * matched_tokens,
+                                  prompt_token_ids = [0] * total_external_matched_tokens,
                                   sampling_params = SamplingParams.from_optional(),
                                   pooling_params = None,
                                   is_prefetch_req = True)
-                tmp_req.block_hashes = tmp_prefetch_req.block_hashes
+                tmp_req.block_hashes = exist_external_block_hash
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     tmp_req,
-                    matched_tokens
+                    total_external_matched_tokens
                 )
                 if new_blocks:
                     tmp_prefetch_req.dest_block_ids = new_blocks.get_block_ids()[0]
-                    tmp_prefetch_req.token_len = matched_tokens
+                    tmp_prefetch_req.token_len = total_external_matched_tokens
                 else:
                     break
                 logger.info(f"new_blocks is {new_blocks} ids {tmp_prefetch_req.dest_block_ids}")
-                self.session_pooling_manager._submit_prefetch_to_scheduler(tmp_prefetch_req, matched_tokens)
+                self.session_pooling_manager._submit_prefetch_to_scheduler(tmp_prefetch_req, total_external_matched_tokens)
                 self.session_pooling_manager.prefetch_running_queue.append(tmp_req)
             except Exception as e:
                 logger.error("Prefetch failed for request %s: %s",
