@@ -880,9 +880,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return self
         else:
             if not self.agent_hint.session_id:
-                logger.warning(f'session_id is empty, set agent_hint None')
+                logger.warning(f'session_id is empty, set agent_hint None.')
                 self.agent_hint = None
                 return self
+            if self.agent_hint.context_management and not self.agent_hint.context_management.manage_request:
+                logger.warning(f'manage_request is false, set context_management None.')
+                self.agent_hint.context_management = None
 
         return self
 
