@@ -126,6 +126,10 @@ class SessionAwareManager:
         ephemeral_start = ephemeral_range.block_offset if ephemeral_range else None
 
         for idx, block_id in enumerate(block_ids):
+            block = self.kv_cache_manager.block_pool.blocks[block_id]
+            if block.block_hash is None:
+                break
+
             is_ephemeral = (
                 ephemeral_start is not None and idx <= ephemeral_start
             )
@@ -358,25 +362,29 @@ class SessionAwareManager:
     # def _mark_block_hash_evictable(self, block_id: int) -> None:
         # """标记 block hash 可被惰性清除（SAM 内部）"""
 
-    def _execute_offload(self, block_ids: list[int], session_id: str) -> None:
+    def _execute_offload(self, session_id: str) -> None:
         """卸载指定范围的 block — 减少 session 引用 + 清除当前session的TTL（通知TTLManager）"""
-        for block_id in block_ids:
-            self._remove_session_block_ref(session_id, block_id)
-            self.kv_cache_manager.update_block_meta(block_id, delta_ref=-1)
+        return
 
     def _execute_prefetch(
             self,
             session_id: str,
-            logical_block_start: int,
-            logical_block_end: int,
+            block_ids: list[int],
         ) -> None:
         """预取: 分配新的blcok，添加session信息，加载cache（hash）"""
         """通知 SPM 创建远端预取任务。"""
+        block_hashes = []
+        for block_id in block_ids:
+            block = self.kv_cache_manager.block_pool.blocks[block_id]
+            block_hash = block.block_hash
+            if block_hash is None:
+                break
+            block_hashes.append[block_hash]
+
         self._notify_event(
             "context_management_prefetch",
             session_id=session_id,
-            logical_block_start=logical_block_start,
-            logical_block_end=logical_block_end,
+            block_hashes=block_hashes,
         )
 
     def _get_session_global_block_ids(self, session_id: str) -> list[int]:
@@ -393,22 +401,28 @@ class SessionAwareManager:
         affected_block_hashes: list[BlockHash] = []
 
         for block_id in block_ids:
-            record = self._block_sessions.get(block_id, {}).get(session_id)
-            if record is None:
+            cur_block_session = self._block_sessions.get(block_id, {})
+            record = cur_block_session.get(session_id)
+            if len(cur_block_session)==0 or record is None:
                 continue
 
             if record.is_ephemeral:
                 self._ttl_manager.remove(block_id, session_id)
 
             self._remove_session_block_ref(session_id, block_id)
+            sorted_ttl = sorted([cur_record.ttl_expire_at for cur_record in cur_block_session.values()])
             self.kv_cache_manager.update_block_meta(
                 block_id,
                 delta_ref=-1,
-                ttl_expire_at=0.0,
+                ttl_expire_at=sorted_ttl[-1],
             )
-            block_hash = get_block_hash(self.kv_cache_manager.block_pool.blocks[block_id].block_hash)
-            affected_block_hashes.append(block_hash)
-            affected_block_ids.append(block_id)
+
+            # 只有当前session引用移除后，block无任何session引用时，才将其加入通知列表
+            block = self.kv_cache_manager.block_pool.blocks[block_id]
+            if block.num_session_refs == 0:
+                block_hash = get_block_hash(self.kv_cache_manager.block_pool.blocks[block_id].block_hash)
+                affected_block_hashes.append(block_hash)
+                affected_block_ids.append(block_id)
         #TODO: session引用是否清零
         if affected_block_ids:
             logger.warning(

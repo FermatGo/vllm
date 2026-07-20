@@ -428,10 +428,6 @@ class KVCacheManager:
 
         new_kv_cache_blocks = self.create_kv_cache_blocks(new_blocks)
 
-        if (self._on_blocks_allocated is not None and 
-            new_kv_cache_blocks is not self.empty_kv_cache_blocks):
-            self._on_blocks_allocated(request, new_kv_cache_blocks)
-
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
@@ -447,6 +443,10 @@ class KVCacheManager:
             request.num_tokens,
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
+
+        if (self._on_blocks_allocated is not None and 
+            new_kv_cache_blocks is not self.empty_kv_cache_blocks):
+            self._on_blocks_allocated(request, new_kv_cache_blocks)
 
         return new_kv_cache_blocks
 
