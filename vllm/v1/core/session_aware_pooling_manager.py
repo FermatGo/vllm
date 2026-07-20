@@ -35,10 +35,9 @@ class PrefetchRequest:
     session_id: str
     request_id: str              # 关联的请求 ID
     block_hashes: list[BlockHash]      # 需要预取的 block hash 列表
-    pool_keys: list[str]        # 对应的 PoolKey 列表
     token_len: int               # 需要预取的 token 数量
     created_at: float            # 创建时间
-    dest_block_ids: list[int]    # 待搬入block ids
+    dest_block_ids: tuple[list[int], ...] | list[int] | list[list[int]] | None   # 待搬入block ids
     priority: int = 0            # 优先级（0=最高，由 manage_request 触发）
 
 
@@ -63,116 +62,33 @@ class SessionKeyTracker:
             with SessionKeyTracker._instance_lock:
                 if not hasattr(SessionKeyTracker, "_instance"):
                     SessionKeyTracker._instance = object.__new__(cls)
-                    # session_id → {PoolKey → block_hash}
-                    SessionKeyTracker._instance._session_keys: dict[str, dict[str, BlockHash]] = {}
-                    # 反向索引session_id → {block_hash → PoolKey}
-                    SessionKeyTracker._instance._session_hashes: dict[str, dict[BlockHash, str]] = {}
-                    # 反向索引：PoolKey string → {session_id}
-                    SessionKeyTracker._instance._key_sessions: dict[str, set[str]] = {}
-                    # {block_hash →PoolKey}
-                    SessionKeyTracker._instance._hash_keys: dict[BlockHash, str] = {}
+                    SessionKeyTracker._instance._block_hashes: set[BlockHash] = set()
                     SessionKeyTracker._instance._lock = threading.Lock()
         return SessionKeyTracker._instance
 
-    def add_keys(
+    def get_hashes(self) -> list[BlockHash]:
+        return list(self._block_hashes)
+    
+    def add_hashes(
         self,
-        session_id: str,
-        keys: list[str],
         block_hashes: list[BlockHash],
     ) -> None:
-        """Session 的 KV cache 被 put 到远端时记录。
-        幂等调用：如果 key 已存在，仅更新反向索引。
-        """
         with self._lock:
-            if session_id not in self._session_keys:
-                self._session_keys[session_id] = {}
-                self._session_hashes[session_id] = {}
-            for key, bh in zip(keys, block_hashes):
-                self._session_keys[session_id][key] = bh
-                self._session_hashes[session_id][bh] = key
-                self._hash_keys[bh] = key
-                if key not in self._key_sessions:
-                    self._key_sessions[key] = set()
-                self._key_sessions[key].add(session_id)
-                # logger.info(f"SessionKeyTracker: add blocks: session_id: {session_id},  keys: {keys}, block_hashes: {block_hashes}")
-
-    def remove_session(self, session_id: str) -> list[str]:
-        """Session 被清理时移除所有 key 关联。
-        返回该 session 独有的、不再被其他 session 引用的 PoolKey 列表。
-        """
-        with self._lock:
-            session_keys = self._session_keys.pop(session_id, {})
-            self._session_hashes.pop(session_id, {})
-            orphaned_keys = []
-            for key in session_keys:
-                if session_id in self._key_sessions.get(key, set()):
-                    self._key_sessions[key].discard(session_id)
-                    if not self._key_sessions[key]:
-                        # 无其他 session 引用，该 key 不再需要 Keep-Alive
-                        self._key_sessions.pop(key, None)
-                        orphaned_keys.append(key)
-            logger.info(f"SessionKeyTracker: remove session: session_id: {session_id},  remove keys: {orphaned_keys}")
-            return orphaned_keys
-
-    def get_key_by_block_hash(self, block_hash: BlockHash) -> str:
-        """根据session_id从block_hash反查pool_key。
-        """
-        with self._lock:
-            pool_key = self._hash_keys.get(block_hash, None)
-            return pool_key
-
-
-    def remove_keys(self, session_id: str, keys: list[str]) -> list[str]:
-        """移除 session 对特定 key 的关联（用于部分驱逐）。
-        返回不再被任何 session 引用的 PoolKey 列表。
-        """
-        with self._lock:
-            orphaned_keys = []
-            for key in keys:
-                if session_id in self._session_keys:
-                    bh = self._session_keys[session_id].pop(key, None)
-                    self._session_hashes[session_id].pop(bh, None)
-                if key in self._key_sessions:
-                    self._key_sessions[key].discard(session_id)
-                    if not self._key_sessions[key]:
-                        self._key_sessions.pop(key, None)
-                        orphaned_keys.append(key)
-            logger.info(f"SessionKeyTracker: remove keys: {orphaned_keys}")
-            return orphaned_keys
-
-    def get_active_keys(
+            for block_hash in block_hashes:
+                self._block_hashes.add(block_hash)
+                logger.debug(f"SessionKeyTracker.add_hashes: block_hash saved: {block_hash}")
+    
+    def remove_hashes(
         self,
-        session_ids: list[str] | None = None
-    ) -> list[str]:
-        """获取活跃 session 的 PoolKey（用于 Keep-Alive）。
-        如果指定 session_ids，仅返回这些 session 的 key；
-        否则返回所有活跃 session 的 key。
-        """
+        block_hashes: list[BlockHash],
+    ) -> None:
         with self._lock:
-            if session_ids is not None:
-                all_keys = set()
-                for sid in session_ids:
-                    all_keys.update(self._session_keys.get(sid, {}).keys())
-            else:
-                all_keys = set(self._key_sessions.keys())
-            result = list(all_keys)
-            # logger.info(f"SessionKeyTracker: active keys: {result}")
-            return result
-
-    def get_session_keys(self, session_id: str) -> list[str]:
-        """获取指定 session 的所有 PoolKey"""
-        with self._lock:
-            return list(self._session_keys.get(session_id, {}).keys())
-
-    def get_session_block_hashes(self, session_id: str) -> list[str]:
-        """获取指定 session 的所有 block hash（用于预取时构建 lookup 参数）"""
-        with self._lock:
-            return list(self._session_keys.get(session_id, {}).values())
-
-    def get_key_sessions(self, key: str) -> set[str]:
-        """获取指定 PoolKey 关联的所有 session（用于共享 key 判断）"""
-        with self._lock:
-            return self._key_sessions.get(key, set()).copy()
+            for block_hash in block_hashes:
+                if block_hash not in self._block_hashes:
+                    logger.info(f"SessionKeyTracker.remove_hash: block_hash not save: {block_hash}")
+                else:
+                    self._block_hashes.remove(block_hash)
+                    logger.debug(f"SessionKeyTracker.remove_hashes: block_hash removed: {block_hash}")
 
 
 class KVCacheKeepAliveThread(threading.Thread):
@@ -184,6 +100,7 @@ class KVCacheKeepAliveThread(threading.Thread):
         session_key_tracker: SessionKeyTracker,
         interval: int = 60,           # 刷新间隔（秒）
         max_keys_per_cycle: int = 0,  # 每轮最多刷新的 key 数（0=不限）
+        block_size: int = 0,
     ):
         super().__init__(daemon=True, name="KVCacheKeepAliveThread")
         self.connector = connector
@@ -191,18 +108,23 @@ class KVCacheKeepAliveThread(threading.Thread):
         self.interval = interval
         self.max_keys = max_keys_per_cycle
         self._stopped = threading.Event()
+        self.block_size = block_size
 
     def run(self):
         #TODO: max keys改为chunk发送
         while not self._stopped.wait(self.interval):
             try:
-                keys = self.tracker.get_active_keys()
-                if not keys:
+                hashes = self.tracker.get_hashes()
+                if not hashes:
                     continue
-                for i in range(0, len(keys), self.max_keys):
-                    batch = keys[i:i+self.max_keys]
-                    res = self.connector.look_up_keys(batch)
-                    logger.info(f"Keep-alive thread return: {res}")
+                hints_block_nums = 0
+                for i in range(0, len(hashes), self.max_keys):
+                    batch = hashes[i:i+self.max_keys]
+                    nums = len(batch)
+                    token_len = self.block_size * nums
+                    res = self.connector.look_up_keys(token_len, batch)
+                    hints_block_nums = hints_block_nums + res // self.block_size
+                logger.info(f"KVCacheKeepAliveThread: all block numbers: {len(hashes)} hints block numbers: {hints_block_nums}")
             except Exception as e:
                 logger.error("Keep-alive thread error: %s", e)
 
@@ -258,6 +180,7 @@ class SessionAwarePoolingManager(SessionEventListener):
                 session_key_tracker=self.key_tracker,
                 interval=self.config.keep_alive_interval,
                 max_keys_per_cycle=self.config.max_keys_per_cycle,
+                block_size=self.block_size,
             )
             self.keep_alive_thread.start()
             logger.info("Keep-alive thread start.")
@@ -276,124 +199,74 @@ class SessionAwarePoolingManager(SessionEventListener):
         return
 
     # 可以通过ascend的pool_worker的回调函数来调用key_tracker.add_keys
-    def on_session_blocks_allocated(
+    def on_session_blocks_protected(
         self,
-        session_id: str,
-        block_ids: list[int],
-        pool_keys: list[str],
         block_hashes: list[BlockHash],
     ) -> None:
-        """block 被分配且 KV cache 被写入远端后记录 PoolKey"""
-        pass
+        """block 保护"""
+        self.key_tracker.add_hashes(block_hashes)
 
-    def on_session_cache_hit(
+    def on_session_blocks_removed(
         self,
-        session_id: str,
-        block_id: int,
-        # pool_key: str | None,
-        block_hash: BlockHash | None,
+        block_hashes: list[BlockHash],
     ) -> None:
-        """prefix cache 命中时记录 PoolKey（幂等）"""
-        if block_hash is not None:
-            pool_key = self.key_tracker.get_key_by_block_hash(block_hash)
-            block_key = self.key_tracker._session_hashes.get(session_id, None)
-            if block_key is not None:
-                key = block_key.get(block_hash, None)
-                if key is not None:
-                    return
-            self.key_tracker.add_keys(session_id, [pool_key], [block_hash])
+        """block 移除"""
+        self.key_tracker.remove_hashes(block_hashes)
 
-    def on_session_ttl_expired(self, session_id: str, block_ids: list[int], block_hashs: list[BlockHash]) -> None:
-        """TTL 到期时检查远端 KV cache 是否需驱逐"""
-        if not self.config.enable_eviction:
-            return
-        # TTL 到期的 block 可能对应的 PoolKey 仍有其他 session 引用
-        # 需检查每个 block 对应的 PoolKey
-        # for block_id in block_ids:
-        #     pool_keys = self._get_block_pool_keys(block_id)
-        #     for key in pool_keys:
-        #         remaining = self.key_tracker.get_key_sessions(key)
-        #         if not remaining:
-        #             self._mark_for_eviction(session_id, [key], is_partial=True)
-        for block_hash in block_hashs:
-            pool_key = self.key_tracker.get_key_by_block_hash(block_hash)
-            remaining = self.key_tracker.get_key_sessions(pool_key)
-            if not remaining:
-                self._mark_for_eviction(session_id, [pool_key], is_partial=True)
+    # def on_session_cache_hit(
+    #     self,
+    #     block_hashes: list[BlockHash],
+    # ) -> None:
+    #     """prefix cache 命中时记录 PoolKey（幂等）"""
+    #     self.on_session_blocks_protected(block_hashes)
+
+    # def on_session_ttl_expired(self, block_hashs: list[BlockHash]) -> None:
+    #     """TTL 到期时检查远端 KV cache 是否需驱逐"""
+    #     return
 
     def on_session_freed(self, session_id: str) -> None:
         """Session 被清理时移除所有 PoolKey 关联并标记驱逐"""
-        orphaned_keys = self.key_tracker.remove_session(session_id)
-        if orphaned_keys and self.config.enable_eviction:
-            self._eviction_marks[session_id] = EvictionMark(
-                session_id=session_id,
-                pool_keys=orphaned_keys,
-                evict_at=time.monotonic() + self.config.eviction_grace_period,
-            )
+        return
 
-    def on_context_management_evict(
-        self,
-        session_id: str,
-        block_ids: list[int],
-        # pool_keys: list[str],
-        block_hashes: list[BlockHash],
-    ) -> None:
-        """evict 操作时移除部分 PoolKey 关联"""
-        logger.info(f"SessionAwarePoolingManager.on_context_management_evict: required session_id: {session_id}, required block_hashes: {block_hashes}"
-                           f"SessionKeyTracker saved session_id's block_hashes: {self.key_tracker._session_keys[session_id].values()}")
-        if block_hashes:
-            pool_keys = []
-            for block_hash in block_hashes:
-                pool_key = self.key_tracker.get_key_by_block_hash(block_hash)
-                if pool_key is not None:
-                    pool_keys.append(pool_key)
-            orphaned_keys = self.key_tracker.remove_keys(session_id, pool_keys)
-            if orphaned_keys and self.config.enable_eviction:
-                self._mark_for_eviction(
-                    session_id, orphaned_keys, is_partial=True
-                )
+    # def on_context_management_evict(
+    #     self,
+    #     block_hashes: list[BlockHash],
+    # ) -> None:
+    #     """evict 操作时移除部分 PoolKey 关联"""
+    #     return
 
     def on_context_management_offload(self, session_id: str, block_ids: list[int]) -> None:
         """offload 操作时仅移除本地 block 引用，远端 KV cache 保留"""
         return
 
-    def on_context_management_prefetch(
-        self,
-        session_id: str,
-        logical_block_start: int,
-        logical_block_end: int,
-        block_ids: list[int] | None = None,
-    ) -> bool:
-        """prefetch 操作时创建预取请求"""
-        if not self.config.enable_prefetch:
-            return
-        token_len = (logical_block_end - logical_block_start) * self.block_size
-        block_hashes = self.key_tracker.get_session_block_hashes(session_id)[logical_block_start:logical_block_end]
-        logger.info(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
-                    f"token_len {token_len} block_ids {block_ids}")
-        #预取需要的参数：Pool keys, block hash以及HBM上的block id
-        #TODO: 预取请求分配block ids
-        #TODO: 传入参数对齐，需要block hash
-        #TODO: 计算token len？如何获取 1. blocksize * block数 2. pymotor传入解析
-        pool_keys = self.key_tracker.get_session_keys(session_id)[logical_block_start:logical_block_end]
-        request = PrefetchRequest(
-            session_id=session_id,
-            request_id=f"__prefetch_{session_id}_{time.monotonic():.0f}",
-            block_hashes=block_hashes,
-            pool_keys=pool_keys[:len(block_hashes)],
-            token_len=token_len,
-            priority=0,
-            created_at=time.monotonic(),
-            dest_block_ids=block_ids
-        )
-        if len(self.prefetch_waiting_queue) < self.config.prefetch_max_queue_size:
-            self.prefetch_waiting_queue.append(request)
-            logger.info(f"SessionAwarePoolingManager on_context_management_prefetch: prefetch_waiting_queue added PrefetchRequest: {PrefetchRequest}")
-            return True
-        else:
-            logger.warning(f"prefetch queue is reaching the max queue size {self.config.prefetch_max_queue_size} "
-                           f"and failed to add to the queue")
-            return False
+    # def on_context_management_prefetch(
+    #     self,
+    #     session_id: str,
+    #     block_hashes: list[BlockHash],
+    # ) -> bool:
+    #     """prefetch 操作时创建预取请求"""
+    #     if not self.config.enable_prefetch:
+    #         return
+    #     token_len = len(block_hashes) * self.block_size
+    #     logger.info(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
+    #                 f"token_len {token_len}")
+    #     request = PrefetchRequest(
+    #         session_id=session_id,
+    #         request_id=f"__prefetch_{session_id}_{time.monotonic():.0f}",
+    #         block_hashes=block_hashes,
+    #         token_len=token_len,
+    #         priority=0,
+    #         created_at=time.monotonic(),
+    #         dest_block_ids=None,
+    #     )
+    #     if len(self.prefetch_waiting_queue) < self.config.prefetch_max_queue_size:
+    #         self.prefetch_waiting_queue.append(request)
+    #         logger.info(f"SessionAwarePoolingManager on_context_management_prefetch: prefetch_waiting_queue added PrefetchRequest: {PrefetchRequest}")
+    #         return True
+    #     else:
+    #         logger.warning(f"prefetch queue is reaching the max queue size {self.config.prefetch_max_queue_size} "
+    #                        f"and failed to add to the queue")
+    #         return False
 
     # --- 调度循环集成 ---
     def on_check_matched_token(
@@ -476,19 +349,7 @@ class SessionAwarePoolingManager(SessionEventListener):
 
     def process_eviction_marks(self, now: float | None = None) -> None:
         """处理驱逐标记 — 停止 Keep-Alive 保护"""
-
-        now = now or time.monotonic()
-        expired_marks = []
-
-        for session_id, mark in self._eviction_marks.items():
-            if now >= mark.evict_at:
-                # PoolKey 已从 SessionKeyTracker 中移除
-                # Keep-Alive 线程不再刷新这些 key
-                # 远端 LRU 自然淘汰
-                expired_marks.append(session_id)
-
-        for session_id in expired_marks:
-            del self._eviction_marks[session_id]
+        return
 
     def _mark_for_eviction(
         self,
@@ -496,22 +357,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         pool_keys: list[str],
         is_partial: bool = False,
     ) -> None:
-        mark_key = f"{session_id}_{'partial' if is_partial else 'full'}"
-        existing = self._eviction_marks.get(mark_key)
-        if existing is None:
-            self._eviction_marks[mark_key] = EvictionMark(
-                session_id=session_id,
-                pool_keys=pool_keys,
-                evict_at=time.monotonic() + self.config.eviction_grace_period,
-                is_partial=is_partial,
-            )
-        else:
-            # 合并 PoolKey
-            existing.pool_keys.extend(pool_keys)
-            existing.evict_at = max(
-                existing.evict_at,
-                time.monotonic() + self.config.eviction_grace_period
-            )
+        return
 
     def _get_block_pool_keys(self, block_id: int) -> list[str]:
         """通过 block_id 查找对应的 PoolKey（需要从 KVCacheManager 获取 block_hash）"""
@@ -519,3 +365,74 @@ class SessionAwarePoolingManager(SessionEventListener):
         # 这需要在 block 分配时建立映射，或通过 block_pool.blocks[block_id]._block_hash 间接获取
         # 实现时需要与 KVCacheManager/AscendStoreConnector 协调
         return []
+
+##############################################################
+    def on_session_blocks_allocated(
+        self,
+        session_id: str = None,
+        block_ids: list[int] = None,
+        pool_keys: list[str] = None,       # 远端 PoolKey 列表（来自 AscendStoreConnector）
+        block_hashes: list[BlockHash] = None,    # 对应的 block hash
+    ) -> None:
+        return
+    
+    def on_session_cache_hit(
+        self,
+        session_id: str = None,
+        block_id: int = None,
+        block_hash: BlockHash | None = None,
+    ) -> None:
+        return
+    
+    def on_session_ttl_expired(
+        self,
+        session_id: str = None,
+        block_ids: list[int] = None,
+        block_hash: BlockHash | None = None,
+    ) -> None:
+        return
+    
+    def on_context_management_prefetch(
+        self,
+        session_id: str = None,
+        logical_block_start: int = None,
+        logical_block_end: int = None,
+        block_ids: list[int] | None = None,
+    ) -> bool:
+        if not self.config.enable_prefetch:
+            return
+        token_len = (logical_block_end - logical_block_start) * self.block_size
+        block_hashes = self.key_tracker.get_session_block_hashes(session_id)[logical_block_start:logical_block_end]
+        logger.info(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
+                    f"token_len {token_len} block_ids {block_ids}")
+        #预取需要的参数：Pool keys, block hash以及HBM上的block id
+        #TODO: 预取请求分配block ids
+        #TODO: 传入参数对齐，需要block hash
+        #TODO: 计算token len？如何获取 1. blocksize * block数 2. pymotor传入解析
+        pool_keys = self.key_tracker.get_session_keys(session_id)[logical_block_start:logical_block_end]
+        request = PrefetchRequest(
+            session_id=session_id,
+            request_id=f"__prefetch_{session_id}_{time.monotonic():.0f}",
+            block_hashes=block_hashes,
+            pool_keys=pool_keys[:len(block_hashes)],
+            token_len=token_len,
+            priority=0,
+            created_at=time.monotonic(),
+            dest_block_ids=block_ids
+        )
+        if len(self.prefetch_waiting_queue) < self.config.prefetch_max_queue_size:
+            self.prefetch_waiting_queue.append(request)
+            logger.info(f"SessionAwarePoolingManager on_context_management_prefetch: prefetch_waiting_queue added PrefetchRequest: {PrefetchRequest}")
+            return True
+        else:
+            logger.warning(f"prefetch queue is reaching the max queue size {self.config.prefetch_max_queue_size} "
+                           f"and failed to add to the queue")
+            return False
+    
+    def on_context_management_evict(
+        self,
+        session_id: str = None,
+        block_ids: list[int] = None,
+        pool_keys: list[str] = None,      # 被驱逐 block 对应的远端 PoolKey
+    ) -> None:
+        return
