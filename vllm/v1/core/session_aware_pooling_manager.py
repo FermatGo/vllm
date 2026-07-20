@@ -82,8 +82,8 @@ class SessionKeyTracker:
         self,
         block_hashes: list[BlockHash],
     ) -> int:
+        removed_nums = 0
         with self._lock:
-            removed_nums = 0
             for block_hash in block_hashes:
                 if block_hash not in self._block_hashes:
                     logger.info(f"SessionKeyTracker.remove_hash: block_hash not save: {block_hash}")
