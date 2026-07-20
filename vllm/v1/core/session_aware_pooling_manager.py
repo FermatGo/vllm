@@ -398,27 +398,25 @@ class SessionAwarePoolingManager(SessionEventListener):
         logical_block_start: int = None,
         logical_block_end: int = None,
         block_ids: list[int] | None = None,
+        block_hashes: list[BlockHash] = None,
     ) -> bool:
+        """prefetch 操作时创建预取请求"""
         if not self.config.enable_prefetch:
-            return
-        token_len = (logical_block_end - logical_block_start) * self.block_size
-        block_hashes = self.key_tracker.get_session_block_hashes(session_id)[logical_block_start:logical_block_end]
+            return True
+        if block_hashes is None:
+            logger.warning("block_hashes can not be None")
+            return True
+        token_len = len(block_hashes) * self.block_size
         logger.info(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
-                    f"token_len {token_len} block_ids {block_ids}")
-        #预取需要的参数：Pool keys, block hash以及HBM上的block id
-        #TODO: 预取请求分配block ids
-        #TODO: 传入参数对齐，需要block hash
-        #TODO: 计算token len？如何获取 1. blocksize * block数 2. pymotor传入解析
-        pool_keys = self.key_tracker.get_session_keys(session_id)[logical_block_start:logical_block_end]
+                    f"token_len {token_len}")
         request = PrefetchRequest(
             session_id=session_id,
             request_id=f"__prefetch_{session_id}_{time.monotonic():.0f}",
             block_hashes=block_hashes,
-            pool_keys=pool_keys[:len(block_hashes)],
             token_len=token_len,
             priority=0,
             created_at=time.monotonic(),
-            dest_block_ids=block_ids
+            dest_block_ids=None,
         )
         if len(self.prefetch_waiting_queue) < self.config.prefetch_max_queue_size:
             self.prefetch_waiting_queue.append(request)

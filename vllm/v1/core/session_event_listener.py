@@ -74,6 +74,7 @@ class SessionEventListener(Protocol):
         logical_block_start: int = None,
         logical_block_end: int = None,
         block_ids: list[int] | None = None,
+        block_hashes: list[BlockHash] = None,
     ) -> bool: ...
 
     def on_context_management_evict(
