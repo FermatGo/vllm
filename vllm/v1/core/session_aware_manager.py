@@ -810,6 +810,11 @@ class SessionController:
                 f"Could not find session {session_id} with block ref record in SAM, failed to perform context management edit")
             return global_block_ids
 
+        if edit.target == "session" and (edit.block_start is None or edit.block_end is None):
+            edit.block_start = 0
+            edit.block_end = len(global_block_ids)
+            return global_block_ids
+
         if edit.block_end > len(global_block_ids) or edit.block_start > len(global_block_ids):
             logger.warning(f"session {session_id} edit: block end {edit.block_end} or block start {edit.block_start} "
                            f"is out of index, the total kv length is {len(global_block_ids)}, fail to perform edit {edit.type}")
@@ -825,7 +830,7 @@ class SessionController:
     ) -> None:
         """执行单个 edit，通过注册的回调执行实际操作。"""
         # block_start / block_end 由 pymotor 从 message index 转换而来
-        if edit.block_start is None or edit.block_end is None:
+        if edit.target != "session" and (edit.block_start is None or edit.block_end is None):
             logger.info(
                 "Edit type=%s has no block_start/block_end, skipping. edit=%s",
                 edit.type, edit)
@@ -842,10 +847,12 @@ class SessionController:
             logger.warning("No callback registered for edit type: %s, skipping.", edit.type)
             return
 
+        global_block_ids = self._generate_global_ids(session_id, edit)
+        logger.info(f"edit processing info: global_block_ids {global_block_ids} and process block num {len(global_block_ids)}")
+        if len(global_block_ids) == 0:
+            return
+
         if edit.type == "evict":
-            global_block_ids = self._generate_global_ids(session_id, edit)
-            if len(global_block_ids) == 0:
-                return
             fn(session_id, global_block_ids)
         elif edit.type == "prefetch":
             fn(session_id, edit.block_start, edit.block_end)
