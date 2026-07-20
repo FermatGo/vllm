@@ -198,9 +198,7 @@ class EngineCoreEvent(msgspec.Struct):
 @dataclass
 class AgentHintSessionManagementResponse:
     session_id: str | None
-    freed_blocks: int = -1
-    orphaned_blocks: int = -1
-    children_freed: list["AgentHintSessionManagementResponse"] | None = None
+    edit_results: list[Any] | None = None
 
 
 

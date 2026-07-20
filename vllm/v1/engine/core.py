@@ -1189,8 +1189,7 @@ class EngineCoreProc(EngineCore):
 
             req, request_wave = request
             logger.info(f'===== _process_agent_hint_session_management, req.session_id = {req.session_id}, req = {req}')
-            self.scheduler.register_request_context_management_edits(req.request_id, req.session_id, req.context_management)
-
+            edits_results = self.scheduler.register_request_context_management_edits(req.request_id, req.session_id, req.context_management)
 
 
             edits = req.context_management.edits
@@ -1222,6 +1221,7 @@ class EngineCoreProc(EngineCore):
                 EngineCoreOutput(req.request_id, [1], finish_reason=FinishReason.LENGTH,
                                  agent_hint_response=AgentHintSessionManagementResponse(
                                      session_id=req.session_id,
+                                     edit_results=edits_results
                                  ))
             ]
             outputs = EngineCoreOutputs(engine_index=req.client_index, outputs=list)

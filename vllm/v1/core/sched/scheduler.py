@@ -373,9 +373,9 @@ class Scheduler(SchedulerInterface):
         request_id: str,
         session_id: str | None,
         context_management: "ContextManagementParams | None",
-    ) -> None:
+    ) -> list[Any] | None:
         logger.info(f"register context management with req id {request_id} session id {session_id}")
-        self.session_aware_manager._session_controller.process_request_edits(request_id, session_id, context_management)
+        return self.session_aware_manager._session_controller.process_request_edits(request_id, session_id, context_management)
 
 
     # def free_session(self, session_id: str) -> dict:

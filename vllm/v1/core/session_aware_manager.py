@@ -42,6 +42,16 @@ class EphemeralRange:
     block_offset: int      # ephemeral 保护的起始 block index
     ttl: float             # TTL 时长（秒）
 
+@dataclass
+class EditResponse:
+    """session controller针对单个edit返回结构体"""
+    session_id: str # session id
+    type: str # op类型
+    op_staus: bool # 执行状态
+    expected_op_block_num: int = 0 # 预期编辑block数
+    actual_op_block_num: int = 0 # 实际编辑block数
+    fail_reason: str = '' # （可选）执行失败原因
+
 class SessionAwareManager:
     """Session-Aware Manager — 管理 session 生命周期与 block 映射"""
 
@@ -743,7 +753,7 @@ class SessionController:
         request_id: str,
         session_id: str | None,
         context_management: "ContextManagementParams | None",
-    ) -> None:
+    ) -> list[EditResponse] | None:
         """处理请求携带的 context_management edits。
 
         Parameters
@@ -770,8 +780,10 @@ class SessionController:
                 "Processing manage_request edits for request %s, "
                 "session %s, %d edits.",
                 request_id, session_id, len(context_management.edits))
+            edit_results = []
             for edit in context_management.edits:
-                self._execute_single_edit(edit, session_id)
+                edit_results.append(self._execute_single_edit(edit, session_id))
+            return edit_results
         else:
             # 普通请求：记录 edits，在请求完成后执行
             logger.info(
@@ -827,14 +839,20 @@ class SessionController:
         self,
         edit: ContextManagementEditsParams,
         session_id: str,
-    ) -> None:
+    ) -> EditResponse:
         """执行单个 edit，通过注册的回调执行实际操作。"""
         # block_start / block_end 由 pymotor 从 message index 转换而来
+        # 返回格式：EditResponse,记录op操作，session id，状态及详细信息
         if edit.target != "session" and (edit.block_start is None or edit.block_end is None):
             logger.info(
                 "Edit type=%s has no block_start/block_end, skipping. edit=%s",
                 edit.type, edit)
-            return
+            return EditResponse(
+                session_id=session_id,
+                type=edit.type,
+                op_staus=False,
+                fail_reason=f"invalid block start {edit.block_start} or block end {edit.block_end}"
+            )
 
         logger.info(
             "Executing edit type=%s for session %s"
@@ -845,19 +863,39 @@ class SessionController:
         fn = self._registry.get(callback_name)
         if fn is None:
             logger.warning("No callback registered for edit type: %s, skipping.", edit.type)
-            return
+            return EditResponse(
+                session_id=session_id,
+                type=edit.type,
+                op_staus=False,
+                fail_reason=f"invalid edit type {edit.type}"
+            )
 
         global_block_ids = self._generate_global_ids(session_id, edit)
-        logger.info(f"edit processing info: global_block_ids {global_block_ids} and process block num {len(global_block_ids)}")
+        logger.info(
+            f"edit processing info: global_block_ids {global_block_ids} and process block num {len(global_block_ids)}")
         if len(global_block_ids) == 0:
-            return
+            return EditResponse(
+                session_id=session_id,
+                type=edit.type,
+                op_staus=False,
+                fail_reason=f"No block record for session {session_id}"
+            )
 
+        actual_process_blocks = 0
         if edit.type == "evict":
             fn(session_id, global_block_ids)
         elif edit.type == "prefetch":
             fn(session_id, edit.block_start, edit.block_end)
         else:
             fn(session_id)
+
+        return EditResponse(
+            session_id=session_id,
+            type=edit.type,
+            op_staus=True,
+            expected_op_block_num=edit.block_end - edit.block_start,
+            actual_op_block_num=actual_process_blocks
+        )
 
 
 def compute_ephemeral_range(
