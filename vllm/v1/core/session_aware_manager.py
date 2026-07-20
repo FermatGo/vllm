@@ -393,7 +393,7 @@ class SessionAwareManager:
             blocks_result = list(self._session_blocks[session_id].keys())
         return blocks_result
 
-    def _execute_evict(self, session_id: str, block_ids: list[int]) -> None:
+    def _execute_evict(self, session_id: str, block_ids: list[int]) -> int:
         """驱逐指定范围的 block — 减少引用 + 清除当前session的TTL + 标记清除（session引用归0）
         清除本地引用，并通知 SPM 停止对应远端 PoolKey 的 Keep-Alive
         """
@@ -424,15 +424,17 @@ class SessionAwareManager:
                 affected_block_hashes.append(block_hash)
                 affected_block_ids.append(block_id)
         #TODO: session引用是否清零
+        result = 0
         if affected_block_ids:
             logger.warning(
                 f"sending param to context_management_evict session_id {session_id} block_ids {affected_block_ids} block_hashes {affected_block_hashes}")
-            self._notify_event(
+            result = self._notify_event(
                 "context_management_evict",
                 session_id=session_id,
                 block_ids=affected_block_ids,
                 block_hashes=affected_block_hashes,
             )
+        return result
             # 标记 block hash 可被惰性清除(待定)
             # self._mark_block_hash_evictable(block_id)
 
@@ -836,17 +838,6 @@ class SessionController:
                 f"Could not find session {session_id} with block ref record in SAM, failed to perform context management edit")
             return global_block_ids
 
-        if edit.target == "session" and (edit.block_start is None or edit.block_end is None):
-            edit.block_start = 0
-            edit.block_end = len(global_block_ids)
-            return global_block_ids
-
-        if edit.block_end > len(global_block_ids) or edit.block_start > len(global_block_ids):
-            logger.warning(f"session {session_id} edit: block end {edit.block_end} or block start {edit.block_start} "
-                           f"is out of index, the total kv length is {len(global_block_ids)}, fail to perform edit {edit.type}")
-
-        global_block_ids = global_block_ids[edit.block_start:edit.block_end]
-
         return global_block_ids
 
     def _execute_single_edit(
@@ -896,20 +887,43 @@ class SessionController:
             )
 
         actual_process_blocks = 0
+        op_result = True
+        fail_reason = ''
+
         if edit.type == "evict":
-            fn(session_id, global_block_ids)
+            op_result, fail_reason, result_target = self.process_edit_index(edit, global_block_ids)
+            actual_process_blocks = fn(session_id, result_target)
         elif edit.type == "prefetch":
-            fn(session_id, edit.block_start, edit.block_end)
+            # TODO: 获取hash list 后裁剪将结果传入回调
+            op_result, fail_reason, result_target = self.process_edit_index(edit, global_block_ids)
+            fn(session_id, result_target)
+            actual_process_blocks = edit.block_end - edit.block_start
         else:
             fn(session_id)
+            actual_process_blocks = edit.block_end - edit.block_start
 
         return EditResponse(
             session_id=session_id,
             type=edit.type,
-            op_staus=True,
+            op_staus=op_result,
             expected_op_block_num=edit.block_end - edit.block_start,
-            actual_op_block_num=actual_process_blocks
+            actual_op_block_num=actual_process_blocks,
+            fail_reason=fail_reason
         )
+
+    def process_edit_index(self, edit:ContextManagementEditsParams, candidate_list: list[Any]) -> tuple[bool, str, list[Any]]:
+        if edit.target == "session" and (edit.block_start is None or edit.block_end is None):
+            edit.block_start = 0
+            edit.block_end = len(candidate_list)
+
+        if edit.block_end > len(candidate_list) or edit.block_start > len(candidate_list):
+            logger.warning(f"edit index out of range: block end {edit.block_end} or block start {edit.block_start} "
+                           f"is out of index, the total kv length is {len(candidate_list)}, fail to perform edit {edit.type}")
+            fail_reason = f"block start {edit.block_start} or block end {edit.block_end}"
+            edit.block_start = edit.block_end = 0
+            return (False, fail_reason, [])
+
+        return (True, '', candidate_list[edit.block_start:edit.block_end])
 
 
 def compute_ephemeral_range(
