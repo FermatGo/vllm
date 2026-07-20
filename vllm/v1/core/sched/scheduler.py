@@ -444,7 +444,7 @@ class Scheduler(SchedulerInterface):
                     total_external_matched_tokens
                 )
                 if new_blocks:
-                    tmp_prefetch_req.dest_block_ids = new_blocks.get_block_ids()[0]
+                    tmp_prefetch_req.dest_block_ids = new_blocks.get_block_ids()
                     tmp_prefetch_req.token_len = total_external_matched_tokens
                 else:
                     break
