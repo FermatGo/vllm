@@ -81,14 +81,18 @@ class SessionKeyTracker:
     def remove_hashes(
         self,
         block_hashes: list[BlockHash],
-    ) -> None:
+    ) -> int:
         with self._lock:
+            removed_nums = 0
             for block_hash in block_hashes:
                 if block_hash not in self._block_hashes:
                     logger.info(f"SessionKeyTracker.remove_hash: block_hash not save: {block_hash}")
                 else:
+                    removed_nums = removed_nums + 1
                     self._block_hashes.remove(block_hash)
                     logger.debug(f"SessionKeyTracker.remove_hashes: block_hash removed: {block_hash}")
+        return removed_nums
+
 
 
 class KVCacheKeepAliveThread(threading.Thread):
@@ -369,7 +373,7 @@ class SessionAwarePoolingManager(SessionEventListener):
 ##############################################################
     def on_session_blocks_allocated(
         self,
-        session_id: str = None,
+        session_id: str | None = None,
         block_ids: list[int] = None,
         pool_keys: list[str] = None,       # 远端 PoolKey 列表（来自 AscendStoreConnector）
         block_hashes: list[BlockHash] = None,    # 对应的 block hash
@@ -378,15 +382,15 @@ class SessionAwarePoolingManager(SessionEventListener):
     
     def on_session_cache_hit(
         self,
-        session_id: str = None,
-        block_id: int = None,
+        session_id: str | None = None,
+        block_id: int | None = None,
         block_hash: BlockHash | None = None,
     ) -> None:
         return
     
     def on_session_ttl_expired(
         self,
-        session_id: str = None,
+        session_id: str | None = None,
         block_ids: list[int] = None,
         block_hash: BlockHash | None = None,
     ) -> None:
@@ -394,8 +398,8 @@ class SessionAwarePoolingManager(SessionEventListener):
     
     def on_context_management_prefetch(
         self,
-        session_id: str = None,
-        logical_block_start: int = None,
+        session_id: str | None = None,
+        logical_block_start: int | None = None,
         logical_block_end: int = None,
         block_ids: list[int] | None = None,
         block_hashes: list[BlockHash] = None,
@@ -429,8 +433,8 @@ class SessionAwarePoolingManager(SessionEventListener):
     
     def on_context_management_evict(
         self,
-        session_id: str = None,
+        session_id: str | None = None,
         block_ids: list[int] = None,
-        pool_keys: list[str] = None,      # 被驱逐 block 对应的远端 PoolKey
-    ) -> None:
-        return
+        block_hashes: list[BlockHash] = None,
+    ) -> int:
+        return self.key_tracker.remove_hashes(block_hashes)

@@ -54,7 +54,7 @@ class SessionEventListener(Protocol):
 
     def on_session_blocks_allocated(
         self,
-        session_id: str,
+        session_id: str | None,
         block_ids: list[int],
         pool_keys: list[str],       # 远端 PoolKey 列表（来自 AscendStoreConnector）
         block_hashes: list[BlockHash],    # 对应的 block hash
@@ -62,31 +62,31 @@ class SessionEventListener(Protocol):
 
     def on_session_cache_hit(
         self,
-        session_id: str = None,
-        block_id: int = None,
+        session_id: str | None = None,
+        block_id: int | None = None,
         # pool_key: str | None,      # cache hit 的 block 对应的远端 PoolKey（可能无）
         block_hash: BlockHash | None = None,
     ) -> None: ...
 
     def on_context_management_prefetch(
         self,
-        session_id: str = None,
-        logical_block_start: int = None,
-        logical_block_end: int = None,
+        session_id: str | None = None,
+        logical_block_start: int | None = None,
+        logical_block_end: int | None = None,
         block_ids: list[int] | None = None,
         block_hashes: list[BlockHash] = None,
     ) -> bool: ...
 
     def on_context_management_evict(
         self,
-        session_id: str = None,
+        session_id: str | None = None,
         block_ids: list[int] = None,
-        pool_keys: list[str] = None,      # 被驱逐 block 对应的远端 PoolKey
+        block_hashes: list[BlockHash] = None,
     ) -> None: ...
 
     def on_session_ttl_expired(
         self,
-        session_id: str = None,
+        session_id: str | None = None,
         block_ids: list[int] = None,
         block_hash: BlockHash | None = None,
     ) -> None: ...
