@@ -776,7 +776,7 @@ class SessionController:
         else:
             # 普通请求：记录 edits，在请求完成后执行
             logger.info(
-                "Deferring %d edits for request %s, session %s.Prefetch will not be performed after request finish",
+                "Deferring %d edits for request %s, session %s. Prefetch will not be performed after request finish",
                 len(context_management.edits), request_id, session_id)
             self._pending_edits[request_id] = [
                 (edit, session_id) for edit in context_management.edits if edit.type != "prefetch"

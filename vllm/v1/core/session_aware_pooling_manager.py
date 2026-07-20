@@ -38,7 +38,7 @@ class PrefetchRequest:
     block_hashes: list[BlockHash]      # 需要预取的 block hash 列表
     token_len: int               # 需要预取的 token 数量
     created_at: float            # 创建时间
-    dest_block_ids: list[int]    # 待搬入block ids
+    dest_block_ids: tuple[list[int], ...] | list[int] | list[list[int]] | None   # 待搬入block ids
     priority: int = 0            # 优先级（0=最高，由 manage_request 触发）
 
 
