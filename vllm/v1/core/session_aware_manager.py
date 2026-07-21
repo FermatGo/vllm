@@ -211,7 +211,7 @@ class SessionAwareManager:
         # cache hit 的 block 应当已经是完整且具有 hash 的 cached block。
         block = self.kv_cache_manager.block_pool.blocks[block_id]
         block_hash = get_block_hash(block.block_hash)
-        self._session_block_hash[session_id].append(block_hash)
+        self._session_block_hash.setdefault(session_id, []).append(get_block_hash(block_hash))
 
         if block_hash is None:
             logger.warning(
@@ -390,7 +390,7 @@ class SessionAwareManager:
         if block_ids:
             for blk in block_ids:
                 block = self.kv_cache_manager.block_pool.blocks[blk]
-                block_hash_list.append(get_block_hash(block))
+                block_hash_list.append(get_block_hash(block.block_hash))
         return block_hash_list
 
 
@@ -726,8 +726,8 @@ class SessionController:
         "execute_offload",
         "execute_prefetch",
         "execute_evict",
-        "get_global_block_id_by_session"
-        "get_block_hashes_by_session"
+        "get_global_block_id_by_session",
+        "get_block_hashes_by_session",
     ]
 
     def __init__(
@@ -922,8 +922,8 @@ class SessionController:
             actual_process_blocks = fn(session_id, result_target, is_session_op)
         elif edit.type == "prefetch":
             callback_name = f"get_block_hashes_by_session"
-            fn = self._registry.get(callback_name)
-            session_hashes = fn(session_id)
+            get_block_hash_fn = self._registry.get(callback_name)
+            session_hashes = get_block_hash_fn(session_id)
             op_result, fail_reason, result_target = self.process_edit_index(edit, session_hashes)
             actual_process_blocks = fn(session_id, result_target)
         else:
