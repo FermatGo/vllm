@@ -91,7 +91,11 @@ class SessionAwareManager:
     ) -> None:
         for group in blocks.get_block_ids():
             for block_id in group:
-                self.on_block_cache_hit(request.session_id, block_id)
+                self.on_block_cache_hit(
+                    session_id=request.session_id, 
+                    block_id=block_id,
+                    ephemeral_range=compute_ephemeral_range(request.cache_control)
+                )
 
     def on_blocks_allocated_for_request(
         self,
@@ -172,6 +176,7 @@ class SessionAwareManager:
         self,
         session_id: str | None,
         block_id: int,
+        ephemeral_range: EphemeralRange | None = None,
     ) -> None:
         """prefix cache 命中时通知 SAM"""
 
@@ -195,12 +200,16 @@ class SessionAwareManager:
                 )
         else:
 
+            ttl_expire_at = 0.0
+            if ephemeral_range and ephemeral_range.ttl > 0:
+                ttl_expire_at = time.monotonic() + ephemeral_range.ttl
+
             # 新增 session 引用
             record = SessionBlockRecord(
                 session_id=session_id,
                 block_id=block_id,
-                is_ephemeral=False,      # cache hit 的 block 不新增 ephemeral 保护
-                ttl_expire_at=0.0,
+                is_ephemeral=ttl_expire_at>0,      # cache hit 的 block 不新增 ephemeral 保护
+                ttl_expire_at=ttl_expire_at,
                 created_at=time.monotonic(),
             )
             self._add_session_block_ref(record)
@@ -259,7 +268,7 @@ class SessionAwareManager:
                 "session_ttl_expired",
                 session_id=[session_id],
                 block_ids=[block_id],
-                block_hashs=[block_hash],
+                block_hash=[block_hash],
             )
 
     def _ensure_session_registered(self, session_id: str, parent_session_id: str) -> None:
