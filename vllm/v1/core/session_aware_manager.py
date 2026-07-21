@@ -77,7 +77,8 @@ class SessionAwareManager:
             execute_offload=self._execute_offload,
             execute_prefetch=self._execute_prefetch,
             execute_evict=self._execute_evict,
-            get_global_block_id_by_session=self._get_session_global_block_ids
+            get_global_block_id_by_session=self._get_session_global_block_ids,
+            get_block_hashes_by_session=self._get_session_block_hash
         )
 
         # 新增：事件监听器列表
@@ -373,7 +374,7 @@ class SessionAwareManager:
             session_id=session_id,
             block_hashes=block_hashes,
         )
-
+        #TODO: 后续返回当前session及其子session的block hash
         return len(block_hashes)
 
     def _get_session_global_block_ids(self, session_id: str) -> list[int]:
@@ -717,7 +718,8 @@ class SessionController:
         "execute_offload",
         "execute_prefetch",
         "execute_evict",
-        "get_global_block_id_by_session"
+        "get_global_block_id_by_session",
+        "get_block_hashes_by_session"
     ]
 
     def __init__(
@@ -838,7 +840,7 @@ class SessionController:
     # ------------------------------------------------------------------
     #  Internal
     # ------------------------------------------------------------------
-    def _generate_global_ids(self, session_id: str, edit: ContextManagementEditsParams) -> list[int]:
+    def _generate_global_ids(self, session_id: str) -> list[int]:
         callback_name = f"get_global_block_id_by_session"
         fn = self._registry.get(callback_name)
         global_block_ids = []
@@ -889,29 +891,33 @@ class SessionController:
                 fail_reason=f"invalid edit type {edit.type}"
             )
 
-        global_block_ids = self._generate_global_ids(session_id, edit)
-        logger.info(
-            f"edit processing info: global_block_ids {global_block_ids} and process block num {len(global_block_ids)}")
-        if len(global_block_ids) == 0:
-            return EditResponse(
-                session_id=session_id,
-                type=edit.type,
-                op_staus=False,
-                fail_reason=f"No block record for session {session_id}"
-            )
+
 
         actual_process_blocks = 0
         op_result = True
         fail_reason = ''
+        is_session_op = edit.type == "session"
 
         if edit.type == "evict":
+            global_block_ids = self._generate_global_ids(session_id)
+            logger.info(
+                f"edit processing info: global_block_ids {global_block_ids} and process block num {len(global_block_ids)}")
+            if len(global_block_ids) == 0:
+                return EditResponse(
+                    session_id=session_id,
+                    type=edit.type,
+                    op_staus=False,
+                    fail_reason=f"No block record for session {session_id}"
+                )
+
             op_result, fail_reason, result_target = self.process_edit_index(edit, global_block_ids)
-            actual_process_blocks = fn(session_id, result_target)
+            actual_process_blocks = fn(session_id, result_target, is_session_op)
         elif edit.type == "prefetch":
-            # TODO: 获取hash list 后裁剪将结果传入回调
-            op_result, fail_reason, result_target = self.process_edit_index(edit, global_block_ids)
-            fn(session_id, result_target)
-            actual_process_blocks = edit.block_end - edit.block_start
+            callback_name = f"get_block_hashes_by_session"
+            fn = self._registry.get(callback_name)
+            session_hashes = fn(session_id)
+            op_result, fail_reason, result_target = self.process_edit_index(edit, session_hashes)
+            actual_process_blocks = fn(session_id, result_target)
         else:
             fn(session_id)
             actual_process_blocks = edit.block_end - edit.block_start
