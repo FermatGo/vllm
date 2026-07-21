@@ -947,6 +947,15 @@ class SessionController:
             op_result, fail_reason, result_target = self.process_edit_index(edit, session_hashes)
             actual_process_blocks = fn(session_id, result_target)
         else:
+            global_block_ids = self._generate_global_ids(session_id)
+            if len(global_block_ids) == 0:
+                return EditResponse(
+                    session_id=session_id,
+                    type=edit.type,
+                    op_staus=False,
+                    fail_reason=f"No block record for session {session_id}"
+                )
+            op_result, fail_reason, result_target = self.process_edit_index(edit, global_block_ids)
             fn(session_id)
             actual_process_blocks = edit.block_end - edit.block_start
 
@@ -960,18 +969,21 @@ class SessionController:
         )
 
     def process_edit_index(self, edit:ContextManagementEditsParams, candidate_list: list[Any]) -> tuple[bool, str, list[Any]]:
-        if edit.target == "session" and edit.block_start is None:
+        if edit.block_start is None:
             edit.block_start = 0
 
         if edit.block_end is None:
             edit.block_end = len(candidate_list)
 
-        if edit.block_end <= edit.block_start:
+        #左闭右闭
+        edit.block_end += 1
+
+        if edit.block_end < edit.block_start:
             fail_reason = f"block start {edit.block_start} is larger or equal to block end {edit.block_end}"
             edit.block_start = edit.block_end = 0
             return (False, fail_reason, [])
 
-        if edit.block_end > len(candidate_list) or edit.block_start > len(candidate_list):
+        if edit.block_start > len(candidate_list):
             logger.warning(f"edit index out of range: block end {edit.block_end} or block start {edit.block_start} "
                            f"is out of index, the total kv length is {len(candidate_list)}, fail to perform edit {edit.type}")
             fail_reason = f"block start {edit.block_start} or block end {edit.block_end} out of range {len(candidate_list)}"
