@@ -67,6 +67,7 @@ class SessionAwareManager:
         # 反向索引：block_id → {session_id → SessionBlockRecord}（可以进一步增加包装类BlockInfo）
         self._session_blocks: dict[str, dict[int, SessionBlockRecord]] = {}
         self._block_sessions: dict[int, dict[str, SessionBlockRecord]] = {}
+        self._session_block_hash: dict[str, list[BlockHash]]
 
         # TTL 管理器（定时轮）
         self._ttl_manager = TTLManager(on_expired=self._on_ttl_expired)
@@ -126,9 +127,11 @@ class SessionAwareManager:
         ephemeral_start = ephemeral_range.block_offset if ephemeral_range else None
 
         for idx, block_id in enumerate(block_ids):
-            block = self.kv_cache_manager.block_pool.blocks[block_id]
-            if block.block_hash is None:
+            block_hash = self.kv_cache_manager.block_pool.blocks[block_id].block_hash
+            if block_hash is None:
                 break
+
+            self._session_block_hash[session_id].append(get_block_hash(block_hash))
 
             is_ephemeral = (
                 ephemeral_start is not None and idx <= ephemeral_start
@@ -207,6 +210,7 @@ class SessionAwareManager:
         # cache hit 的 block 应当已经是完整且具有 hash 的 cached block。
         block = self.kv_cache_manager.block_pool.blocks[block_id]
         block_hash = get_block_hash(block.block_hash)
+        self._session_block_hash[session_id].append(block_hash)
 
         if block_hash is None:
             logger.warning(
@@ -298,10 +302,12 @@ class SessionAwareManager:
             if not self._block_sessions[block_id]:
                 del self._block_sessions[block_id]
 
-    def free_session(self, session_id: str) -> dict:
+    def free_session(self, session_id: str) -> list:
         """清理指定 session 的所有 block 引用"""
         freed_blocks = 0
         orphaned_blocks = 0
+
+        block_hashes = []
 
         if session_id in self._session_blocks:
             for block_id in list(self._session_blocks[session_id].keys()):
@@ -314,6 +320,12 @@ class SessionAwareManager:
 
                 self.kv_cache_manager.update_block_meta(block_id, delta_ref=-1)
 
+                block = self.kv_cache_manager.block_pool.blocks[block_id]
+                block_hashes.append(get_block_hash(block.block_hash))
+                
+            if self._session_block_hash[session_id]:
+                del self._session_block_hash[session_id]
+
         # 移除 session 注册信息
         if session_id in self._sessions:
             parent_session_id = self._sessions[session_id].parent_session_id
@@ -321,30 +333,19 @@ class SessionAwareManager:
                 self._sessions[parent_session_id].children.discard(session_id)
             del self._sessions[session_id]
 
-        return {
-            "session_id": session_id,
-            "freed_blocks": freed_blocks,
-            "orphaned_blocks": orphaned_blocks,
-        }
+        return block_hashes
 
-    def free_session_tree(self, session_id: str) -> dict:
+    def free_session_tree(self, session_id: str) -> list:
         """递归清理session及其所有子session"""
         session_info = self._sessions.get(session_id)
         if session_info is None:
-            return {
-                "session_id": session_id,
-                "freed_blocks": 0,
-                "orphaned_blocks": 0,
-                "children_freed": [],
-            }
+            return []
 
-        children_freed = []
-
+        block_hashes_all = []
         for child_sid in list(self._sessions[session_id].children):
-            child_result = self.free_session_tree(child_sid)
-            children_freed.append(child_result)
+            block_hashes_all.extend(self.free_session_tree(child_sid))
 
-        result = self.free_session(session_id)
+        block_hashes_all.extend(self.free_session(session_id))
 
         logger.info(
             f"Free session tree for session {session_id}: "
@@ -352,15 +353,8 @@ class SessionAwareManager:
             f"session_info: {self._sessions}, "
         )
 
-        return {
-            "session_id": session_id,
-            "freed_blocks": result["freed_blocks"],
-            "orphaned_blocks": result["orphaned_blocks"],
-            "children_freed": children_freed,
-        }
+        return block_hashes_all
 
-    # def _mark_block_hash_evictable(self, block_id: int) -> None:
-        # """标记 block hash 可被惰性清除（SAM 内部）"""
 
     def _execute_offload(self, session_id: str) -> None:
         """卸载指定范围的 block — 减少 session 引用 + 清除当前session的TTL（通知TTLManager）"""
@@ -369,17 +363,10 @@ class SessionAwareManager:
     def _execute_prefetch(
             self,
             session_id: str,
-            block_ids: list[int],
-        ) -> None:
+            block_hashes: list[BlockHash],
+        ) -> int:
         """预取: 分配新的blcok，添加session信息，加载cache（hash）"""
         """通知 SPM 创建远端预取任务。"""
-        block_hashes = []
-        for block_id in block_ids:
-            block = self.kv_cache_manager.block_pool.blocks[block_id]
-            block_hash = block.block_hash
-            if block_hash is None:
-                break
-            block_hashes.append[block_hash]
 
         self._notify_event(
             "context_management_prefetch",
@@ -387,56 +374,83 @@ class SessionAwareManager:
             block_hashes=block_hashes,
         )
 
+        return len(block_hashes)
+
     def _get_session_global_block_ids(self, session_id: str) -> list[int]:
         blocks_result = []
         if session_id in self._session_blocks:
             blocks_result = list(self._session_blocks[session_id].keys())
         return blocks_result
 
-    def _execute_evict(self, session_id: str, block_ids: list[int]) -> int:
+
+    def _get_session_block_hash(self, session_id: str) -> list[BlockHash]:
+        block_hash_list = []
+        block_ids = self._get_session_global_block_ids(session_id)
+        if block_ids:
+            for blk in block_ids:
+                block = self.kv_cache_manager.block_pool.blocks[blk]
+                block_hash_list.append(get_block_hash(block))
+        return block_hash_list
+
+
+    def _execute_evict(self, session_id: str, block_ids: list[int], is_session: bool) -> int:
         """驱逐指定范围的 block — 减少引用 + 清除当前session的TTL + 标记清除（session引用归0）
         清除本地引用，并通知 SPM 停止对应远端 PoolKey 的 Keep-Alive
         """
-        affected_block_ids: list[int] = []
-        affected_block_hashes: list[BlockHash] = []
+        res = 0
+        if not is_session:
+            affected_block_ids: list[int] = []
+            affected_block_hashes: list[BlockHash] = []
 
-        for block_id in block_ids:
-            cur_block_session = self._block_sessions.get(block_id, {})
-            record = cur_block_session.get(session_id)
-            if len(cur_block_session)==0 or record is None:
-                continue
+            for block_id in block_ids:
+                cur_block_session = self._block_sessions.get(block_id, {})
+                record = cur_block_session.get(session_id)
+                if len(cur_block_session)==0 or record is None:
+                    continue
 
-            if record.is_ephemeral:
-                self._ttl_manager.remove(block_id, session_id)
+                if record.is_ephemeral:
+                    self._ttl_manager.remove(block_id, session_id)
 
-            self._remove_session_block_ref(session_id, block_id)
-            sorted_ttl = sorted([cur_record.ttl_expire_at for cur_record in cur_block_session.values()])
-            self.kv_cache_manager.update_block_meta(
-                block_id,
-                delta_ref=-1,
-                ttl_expire_at=sorted_ttl[-1],
-            )
+                self._remove_session_block_ref(session_id, block_id)
+                
+                sorted_ttl = sorted([cur_record.ttl_expire_at for cur_record in cur_block_session.values()]) if len(cur_block_session.values())>0 else [0]
+                self.kv_cache_manager.update_block_meta(
+                    block_id,
+                    delta_ref=-1,
+                    ttl_expire_at=sorted_ttl[-1],
+                )
 
-            # 只有当前session引用移除后，block无任何session引用时，才将其加入通知列表
-            block = self.kv_cache_manager.block_pool.blocks[block_id]
-            if block.num_session_refs == 0:
-                block_hash = get_block_hash(self.kv_cache_manager.block_pool.blocks[block_id].block_hash)
-                affected_block_hashes.append(block_hash)
-                affected_block_ids.append(block_id)
-        #TODO: session引用是否清零
-        result = 0
-        if affected_block_ids:
-            logger.warning(
-                f"sending param to context_management_evict session_id {session_id} block_ids {affected_block_ids} block_hashes {affected_block_hashes}")
-            result = self._notify_event(
+                # 只有当前session引用移除后，block无任何session引用时，才将其加入通知列表
+                block = self.kv_cache_manager.block_pool.blocks[block_id]
+                if block.num_session_refs == 0:
+                    block_hash = get_block_hash(block.block_hash)
+                    affected_block_hashes.append(block_hash)
+                    affected_block_ids.append(block_id)
+            #TODO: session引用是否清零
+            if affected_block_ids:
+                logger.warning(
+                    f"sending param to context_management_evict session_id {session_id} block_ids {affected_block_ids} block_hashes {affected_block_hashes}")
+                res = self._notify_event(
+                    "context_management_evict",
+                    session_id=session_id,
+                    block_ids=affected_block_ids,
+                    block_hashes=affected_block_hashes,
+                )
+
+                for blk_hash in affected_block_hashes:
+                    if blk_hash in self._session_block_hash:
+                        self._session_block_hash[session_id].remove(blk_hash, None)
+                if not self._session_block_hash[session_id]:
+                    del self._session_block_hash[session_id]
+
+        else:
+            block_hashes = self.free_session_tree(session_id)
+            res = self._notify_event(
                 "context_management_evict",
-                session_id=session_id,
-                block_ids=affected_block_ids,
-                block_hashes=affected_block_hashes,
+                block_hashes=block_hashes,
             )
-        return result
-            # 标记 block hash 可被惰性清除(待定)
-            # self._mark_block_hash_evictable(block_id)
+
+        return res
 
     def add_event_listener(self, listener: SessionEventListener):
         """注册事件监听器（SPM 调用）"""
