@@ -47,7 +47,7 @@ class EditResponse:
     """session controller针对单个edit返回结构体"""
     session_id: str # session id
     type: str # op类型
-    op_staus: bool # 执行状态
+    op_status: bool # 执行状态
     expected_op_block_num: int = 0 # 预期编辑block数
     actual_op_block_num: int = 0 # 实际编辑block数
     fail_reason: str = '' # （可选）执行失败原因
@@ -844,6 +844,17 @@ class SessionController:
             edit_results = []
             for edit in context_management.edits:
                 edit_results.append(self._execute_single_edit(edit, session_id))
+                if edit_results[-1].op_status:
+                    logger.info(f"Context management result: session {session_id} type {edit.type} "
+                                f"status {edit_results[-1].op_status} "
+                                f"block start {edit.block_start} block end {edit.block_end} "
+                                f"reason {edit_results[-1].fail_reason}")
+                else:
+                    logger.info(
+                        f"Context management result: session {session_id} type {edit.type} "
+                        f"status {edit_results[-1].op_status} "
+                        f"block start {edit.block_start} block end {edit.block_end} "
+                        f"actual_op_block_num {edit_results[-1].actual_op_block_num}")
             return edit_results
         else:
             # 普通请求：记录 edits，在请求完成后执行
@@ -864,7 +875,18 @@ class SessionController:
             "Executing %d deferred edits for completed request %s.",
             len(pending), request_id)
         for edit, session_id in pending:
-            self._execute_single_edit(edit, session_id)
+            result = self._execute_single_edit(edit, session_id)
+            if result.op_status:
+                logger.info(f"Context management result: session {session_id} type {edit.type} "
+                            f"status {result.op_status} "
+                            f"block start {edit.block_start} block end {edit.block_end} "
+                            f"reason {result.fail_reason}")
+            else:
+                logger.info(
+                    f"Context management result: session {session_id} type {edit.type} "
+                    f"status {result.op_status} "
+                    f"block start {edit.block_start} block end {edit.block_end} "
+                    f"actual_op_block_num {result.actual_op_block_num}")
 
     # ------------------------------------------------------------------
     #  Internal
@@ -900,7 +922,7 @@ class SessionController:
             return EditResponse(
                 session_id=session_id,
                 type=edit.type,
-                op_staus=False,
+                op_status=False,
                 fail_reason=f"invalid block start {edit.block_start} or block end {edit.block_end}"
             )
 
@@ -915,7 +937,7 @@ class SessionController:
             return EditResponse(
                 session_id=session_id,
                 type=edit.type,
-                op_staus=False,
+                op_status=False,
                 fail_reason=f"invalid edit type {edit.type}"
             )
 
@@ -934,7 +956,7 @@ class SessionController:
                 return EditResponse(
                     session_id=session_id,
                     type=edit.type,
-                    op_staus=False,
+                    op_status=False,
                     fail_reason=f"No block record for session {session_id}"
                 )
 
@@ -952,7 +974,7 @@ class SessionController:
                 return EditResponse(
                     session_id=session_id,
                     type=edit.type,
-                    op_staus=False,
+                    op_status=False,
                     fail_reason=f"No block record for session {session_id}"
                 )
             op_result, fail_reason, result_target = self.process_edit_index(edit, global_block_ids)
@@ -962,7 +984,7 @@ class SessionController:
         return EditResponse(
             session_id=session_id,
             type=edit.type,
-            op_staus=op_result,
+            op_status=op_result,
             expected_op_block_num=edit.block_end - edit.block_start,
             actual_op_block_num=actual_process_blocks,
             fail_reason=fail_reason
