@@ -445,7 +445,7 @@ class SessionAwareManager:
         ) -> int:
         """预取: 分配新的blcok，添加session信息，加载cache（hash）"""
         """通知 SPM 创建远端预取任务。"""
-
+        logger.info(f"block_hashes {block_hashes}")
         self._notify_event(
             "context_management_prefetch",
             session_id=session_id,
@@ -462,13 +462,10 @@ class SessionAwareManager:
 
 
     def _get_session_block_hash(self, session_id: str) -> list[BlockHash]:
-        block_hash_list = []
-        block_ids = self._get_session_global_block_ids(session_id)
-        if block_ids:
-            for blk in block_ids:
-                block = self.kv_cache_manager.block_pool.blocks[blk]
-                block_hash_list.append(get_block_hash(block.block_hash))
-        return block_hash_list
+        if session_id in self._session_block_hash:
+            return self._session_block_hash[session_id]
+        else:
+            return []
 
 
     def _execute_evict(self, session_id: str, block_ids: list[int], is_session: bool) -> int:
@@ -1024,7 +1021,9 @@ class SessionController:
             callback_name = f"get_block_hashes_by_session"
             get_block_hash_fn = self._registry.get(callback_name)
             session_hashes = get_block_hash_fn(session_id)
+            logger.info(f"===============session_hashes {session_hashes}")
             op_result, fail_reason, result_target = self.process_edit_index(edit, session_hashes)
+            logger.info(f"===============result_target {result_target}")
             actual_process_blocks = fn(session_id, result_target)
         else:
             global_block_ids = self._generate_global_ids(session_id)
