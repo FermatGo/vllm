@@ -442,11 +442,48 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
+        
+        # cache_blocks() 会原地设置新完成 block 的 block_hash。
+        blocks_before_cache = self.coordinator.get_blocks(request.request_id)
+        uncached_block_ids_before = tuple(
+            {
+                block.block_id
+                for block in group
+                if not block.is_null and block.block_hash is None
+            }
+            for group in blocks_before_cache
+        )
+
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
-        if (self._on_blocks_allocated is not None and 
-            new_kv_cache_blocks is not self.empty_kv_cache_blocks):
-            self._on_blocks_allocated(request, new_kv_cache_blocks)
+        current_blocks = self.coordinator.get_blocks(request.request_id)
+
+        newly_cached_blocks = tuple(
+            [
+                block
+                for block in group
+                if (
+                    not block.is_null
+                    and block.block_id in uncached_ids
+                    and block.block_hash is not None
+                )
+            ]
+            for group, uncached_ids in zip(
+                current_blocks,
+                uncached_block_ids_before,
+            )
+        )
+
+        if (
+            self._on_blocks_allocated is not None
+            and any(newly_cached_blocks)
+        ):
+            self._on_blocks_allocated(
+                request,
+                self.create_kv_cache_blocks(
+                    newly_cached_blocks
+                ),
+            )
 
         return new_kv_cache_blocks
 
