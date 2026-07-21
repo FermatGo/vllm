@@ -177,6 +177,13 @@ class SessionAwareManager:
                 ttl_expire_at=ttl_expire_at if ttl_expire_at > 0 else None,
             )
 
+            block_hashes = self._session_block_hash[session_id]
+            self._notify_event(
+                "session_blocks_protected",
+                block_hashes=block_hashes,
+            )
+
+
     def on_block_cache_hit(
         self,
         session_id: str | None,
@@ -237,9 +244,7 @@ class SessionAwareManager:
 
         self._notify_event(
             "session_cache_hit",
-            session_id=session_id,
-            block_id=block_id,
-            block_hash=block_hash,
+            block_hashes=[block_hash],
         )
 
     def _on_ttl_expired(self, block_id: int, session_id: str) -> None:
@@ -271,9 +276,7 @@ class SessionAwareManager:
             # SAM 状态修改完成后再通知 SPM。
             self._notify_event(
                 "session_ttl_expired",
-                session_id=[session_id],
-                block_ids=[block_id],
-                block_hash=[block_hash],
+                block_hash=block_hash,
             )
 
     def _ensure_session_registered(self, session_id: str, parent_session_id: str) -> None:
