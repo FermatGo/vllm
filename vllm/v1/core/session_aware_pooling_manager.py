@@ -393,8 +393,8 @@ class SessionAwarePoolingManager(SessionEventListener):
         session_id: str | None = None,
         block_ids: list[int] = None,
         block_hash: BlockHash | None = None,
-    ) -> None:
-        return
+    ) -> int:
+        return self.key_tracker.remove_hashes(block_hash)
     
     def on_context_management_prefetch(
         self,
