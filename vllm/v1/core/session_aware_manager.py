@@ -178,11 +178,12 @@ class SessionAwareManager:
             )
 
         # 通知SPM保护hash
-        block_hashes = self._session_block_hash[session_id]
-        self._notify_event(
-            "session_blocks_protected",
-            block_hashes=block_hashes,
-        )
+        block_hashes = self._session_block_hash.get(session_id, [])
+        if block_hashes:
+            self._notify_event(
+                "session_blocks_protected",
+                block_hashes=block_hashes,
+            )
 
 
     def on_block_cache_hit(
