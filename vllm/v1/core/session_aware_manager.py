@@ -243,7 +243,7 @@ class SessionAwareManager:
             return
 
         self._notify_event(
-            "session_cache_hit",
+            "session_blocks_protected",
             block_hashes=[block_hash],
         )
 
