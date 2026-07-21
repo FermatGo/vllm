@@ -67,7 +67,7 @@ class SessionAwareManager:
         # 反向索引：block_id → {session_id → SessionBlockRecord}（可以进一步增加包装类BlockInfo）
         self._session_blocks: dict[str, dict[int, SessionBlockRecord]] = {}
         self._block_sessions: dict[int, dict[str, SessionBlockRecord]] = {}
-        self._session_block_hash: dict[str, list[BlockHash]]
+        self._session_block_hash: dict[str, list[BlockHash]] = {}
 
         # TTL 管理器（定时轮）
         self._ttl_manager = TTLManager(on_expired=self._on_ttl_expired)
@@ -132,7 +132,7 @@ class SessionAwareManager:
             if block_hash is None:
                 break
 
-            self._session_block_hash[session_id].append(get_block_hash(block_hash))
+            self._session_block_hash.setdefault(session_id, []).append(get_block_hash(block_hash))
 
             is_ephemeral = (
                 ephemeral_start is not None and idx <= ephemeral_start
@@ -414,11 +414,18 @@ class SessionAwareManager:
 
                 self._remove_session_block_ref(session_id, block_id)
                 
-                sorted_ttl = sorted([cur_record.ttl_expire_at for cur_record in cur_block_session.values()]) if len(cur_block_session.values())>0 else [0]
+                remaining_records = self._block_sessions.get(block_id, {}).values()
+                latest_ttl_expire_at = max(
+                    (
+                        remaining_record.ttl_expire_at
+                        for remaining_record in remaining_records
+                    ),
+                    default=0.0,
+                )
                 self.kv_cache_manager.update_block_meta(
                     block_id,
                     delta_ref=-1,
-                    ttl_expire_at=sorted_ttl[-1],
+                    ttl_expire_at=latest_ttl_expire_at,
                 )
 
                 # 只有当前session引用移除后，block无任何session引用时，才将其加入通知列表
@@ -427,6 +434,7 @@ class SessionAwareManager:
                     block_hash = get_block_hash(block.block_hash)
                     affected_block_hashes.append(block_hash)
                     affected_block_ids.append(block_id)
+
             #TODO: session引用是否清零
             if affected_block_ids:
                 logger.warning(
@@ -718,7 +726,7 @@ class SessionController:
         "execute_offload",
         "execute_prefetch",
         "execute_evict",
-        "get_global_block_id_by_session",
+        "get_global_block_id_by_session"
         "get_block_hashes_by_session"
     ]
 
