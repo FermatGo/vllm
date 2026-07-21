@@ -89,6 +89,9 @@ class SessionAwareManager:
         request: Request,
         blocks: KVCacheBlocks
     ) -> None:
+
+        logger.info(f'===== on_block_cache_hit_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
+
         for group in blocks.get_block_ids():
             for block_id in group:
                 self.on_block_cache_hit(
@@ -130,6 +133,8 @@ class SessionAwareManager:
         self._ensure_session_registered(session_id, parent_session_id)
 
         ephemeral_start = ephemeral_range.block_offset if ephemeral_range else None
+
+        logger.info(f'===== on_blocks_allocated, block_ids = {block_ids}')
 
         for idx, block_id in enumerate(block_ids):
             block_hash = self.kv_cache_manager.block_pool.blocks[block_id].block_hash
@@ -215,7 +220,7 @@ class SessionAwareManager:
             self._add_session_block_ref(record)
 
             # 统一接口
-            self.kv_cache_manager.update_block_meta(block_id, delta_ref=+1)
+            self.kv_cache_manager.update_block_meta(block_id, delta_ref=+1, ttl_expire_at=ttl_expire_at)
 
         # cache hit 的 block 应当已经是完整且具有 hash 的 cached block。
         block = self.kv_cache_manager.block_pool.blocks[block_id]
@@ -476,19 +481,21 @@ class SessionAwareManager:
 
     def _notify_event(self, event_type: str, **kwargs):
         """通知所有监听器"""
+        ret = 0
         for listener in tuple(self._event_listeners):
             handler = getattr(listener, f"on_{event_type}", None)
             if handler is None:
                 continue
 
             try:
-                handler(**kwargs)
+                ret = handler(**kwargs)
             except Exception:
                 logger.exception(
                     "Session event listener %r failed while handling %s",
                     listener,
                     event_type,
                 )
+        return ret
 
 
 @dataclass
@@ -956,7 +963,7 @@ class SessionController:
         if edit.block_end > len(candidate_list) or edit.block_start > len(candidate_list):
             logger.warning(f"edit index out of range: block end {edit.block_end} or block start {edit.block_start} "
                            f"is out of index, the total kv length is {len(candidate_list)}, fail to perform edit {edit.type}")
-            fail_reason = f"block start {edit.block_start} or block end {edit.block_end}"
+            fail_reason = f"block start {edit.block_start} or block end {edit.block_end} out of range {len(candidate_list)}"
             edit.block_start = edit.block_end = 0
             return (False, fail_reason, [])
 
