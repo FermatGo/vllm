@@ -903,16 +903,16 @@ class SessionController:
             for edit in context_management.edits:
                 edit_results.append(self._execute_single_edit(edit, session_id))
                 if edit_results[-1].op_status:
-                    logger.info(f"Context management result: session {session_id} type {edit.type} "
-                                f"status {edit_results[-1].op_status} "
-                                f"block start {edit.block_start} block end {edit.block_end} "
-                                f"reason {edit_results[-1].fail_reason}")
-                else:
                     logger.info(
                         f"Context management result: session {session_id} type {edit.type} "
                         f"status {edit_results[-1].op_status} "
-                        f"block start {edit.block_start} block end {edit.block_end} "
+                        f"block start {edit.block_start} block end (not included) {edit.block_end} "
                         f"actual_op_block_num {edit_results[-1].actual_op_block_num}")
+                else:
+                    logger.info(f"Context management result: session {session_id} type {edit.type} "
+                        f"status {edit_results[-1].op_status} "
+                        f"block start {edit.block_start} block end (not included) {edit.block_end} "
+                        f"reason {edit_results[-1].fail_reason}")
             return edit_results
         else:
             # 普通请求：记录 edits，在请求完成后执行
@@ -935,16 +935,16 @@ class SessionController:
         for edit, session_id in pending:
             result = self._execute_single_edit(edit, session_id)
             if result.op_status:
-                logger.info(f"Context management result: session {session_id} type {edit.type} "
-                            f"status {result.op_status} "
-                            f"block start {edit.block_start} block end {edit.block_end} "
-                            f"reason {result.fail_reason}")
-            else:
                 logger.info(
                     f"Context management result: session {session_id} type {edit.type} "
                     f"status {result.op_status} "
-                    f"block start {edit.block_start} block end {edit.block_end} "
+                    f"block start {edit.block_start} block end (not included) {edit.block_end} "
                     f"actual_op_block_num {result.actual_op_block_num}")
+            else:
+                logger.info(f"Context management result: session {session_id} type {edit.type} "
+                            f"status {result.op_status} "
+                            f"block start {edit.block_start} block end (not included) {edit.block_end} "
+                            f"reason {result.fail_reason}")
 
     # ------------------------------------------------------------------
     #  Internal
