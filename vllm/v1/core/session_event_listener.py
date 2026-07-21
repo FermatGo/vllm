@@ -17,7 +17,7 @@ class SessionEventListener(Protocol):
     def on_session_blocks_removed(
         self,
         block_hashes: list[BlockHash],
-    ) -> None: ...
+    ) -> int: ...
 
     # def on_session_cache_hit(
     #     self,

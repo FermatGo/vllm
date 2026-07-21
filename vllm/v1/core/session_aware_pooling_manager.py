@@ -213,9 +213,9 @@ class SessionAwarePoolingManager(SessionEventListener):
     def on_session_blocks_removed(
         self,
         block_hashes: list[BlockHash],
-    ) -> None:
+    ) -> int:
         """block 移除"""
-        self.key_tracker.remove_hashes(block_hashes)
+        return self.key_tracker.remove_hashes(block_hashes)
 
     # def on_session_cache_hit(
     #     self,
@@ -394,7 +394,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         block_ids: list[int] = None,
         block_hash: BlockHash | None = None,
     ) -> int:
-        return self.key_tracker.remove_hashes(block_hash)
+        return self.on_session_blocks_removed([block_hash])
     
     def on_context_management_prefetch(
         self,
@@ -437,4 +437,4 @@ class SessionAwarePoolingManager(SessionEventListener):
         block_ids: list[int] = None,
         block_hashes: list[BlockHash] = None,
     ) -> int:
-        return self.key_tracker.remove_hashes(block_hashes)
+        return self.on_session_blocks_removed(block_hashes)
