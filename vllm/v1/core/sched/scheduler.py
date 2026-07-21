@@ -378,10 +378,11 @@ class Scheduler(SchedulerInterface):
         logger.info(f"register context management with req id {request_id} session id {session_id}")
         return self.session_aware_manager._session_controller.process_request_edits(request_id, session_id, context_management)
 
+    def has_prefetch_req(self):
+        return len(self.session_pooling_manager.prefetch_waiting_queue) > 0 if self.session_pooling_manager else False
 
     def process_prefetch_req(self):
         #处理上一轮次prefetch
-        # todo: 适配hbm命中 / 或者远端部分命中 更新hash和block分配
         for i in range(0, len(self.session_pooling_manager.prefetch_running_queue)):
             free_prefetch_running_req = self.session_pooling_manager.prefetch_running_queue[i]
             logger.info(f"free prefetch request {free_prefetch_running_req.request_id} and session id {free_prefetch_running_req.session_id}")
@@ -389,9 +390,8 @@ class Scheduler(SchedulerInterface):
         self.session_pooling_manager.prefetch_running_queue = []
 
         #处理当前轮次prefetch请求
-        stop_idx = 0
+        process_prefetch_count = 0
         for i in range(0, len(self.session_pooling_manager.prefetch_waiting_queue)):
-            stop_idx = i
             try:
                 tmp_prefetch_req = self.session_pooling_manager.prefetch_waiting_queue[i]
                 local_hit_req = Request(request_id=tmp_prefetch_req.request_id,
@@ -404,6 +404,11 @@ class Scheduler(SchedulerInterface):
                 local_hit_req.block_hashes = tmp_prefetch_req.block_hashes
                 local_blocks, local_computed_tokens = self.kv_cache_manager.get_computed_blocks(local_hit_req)
                 logger.info(f"prefetch req: local hit tokens num {local_computed_tokens} of total {tmp_prefetch_req.token_len}")
+
+                if local_computed_tokens == tmp_prefetch_req.token_len:
+                    # HDM有所有预取block hash，不进行预取
+                    process_prefetch_count += 1
+                    continue
 
                 local_hit_block_hashes = []
                 for block_seq in local_blocks.blocks:
@@ -429,6 +434,8 @@ class Scheduler(SchedulerInterface):
                     f"total_external_matched_tokens {total_external_matched_tokens}")
 
                 if total_external_matched_tokens == 0:
+                    # 远端没有所有预取block hash，不进行预取
+                    process_prefetch_count += 1
                     continue
 
                 tmp_req = Request(request_id=tmp_prefetch_req.request_id,
@@ -451,11 +458,20 @@ class Scheduler(SchedulerInterface):
                 logger.info(f"new_blocks is {new_blocks} ids {tmp_prefetch_req.dest_block_ids}")
                 self.session_pooling_manager._submit_prefetch_to_scheduler(tmp_prefetch_req, total_external_matched_tokens)
                 self.session_pooling_manager.prefetch_running_queue.append(tmp_req)
+                process_prefetch_count += 1
             except Exception as e:
                 logger.error("Prefetch failed for request %s: %s",
                              tmp_prefetch_req.request_id, e)
         # update prefetch queue
-        self.session_pooling_manager.prefetch_waiting_queue = self.session_pooling_manager.prefetch_waiting_queue[stop_idx+1:]
+        self.session_pooling_manager.prefetch_waiting_queue = self.session_pooling_manager.prefetch_waiting_queue[process_prefetch_count:]
+        if self.get_num_unfinished_requests() == 0 and len(self.session_pooling_manager.prefetch_running_queue) > 0:
+            company_req = Request(request_id='prefetch_company_request',
+                                  prompt_token_ids = [0] * 1,
+                                  sampling_params = SamplingParams.from_optional(max_tokens=1),
+                                  pooling_params = None,
+                                  is_prefetch_req = True)
+            self.add_request(company_req)
+            logger.info(f"adding company req for unfinish req {self.get_num_unfinished_requests()} and prefetch count {len(self.session_pooling_manager.prefetch_running_queue)}")
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
