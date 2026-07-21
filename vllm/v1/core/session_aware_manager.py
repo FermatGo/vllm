@@ -900,9 +900,8 @@ class SessionController:
             )
 
         logger.info(
-            "Executing edit type=%s for session %s"
-            "(block_start=%d, block_end=%d).",
-            edit.type, session_id, edit.block_start, edit.block_end)
+            f"Executing edit type={edit.type} for session {session_id}"
+            f"(block_start={edit.block_start}, block_end={edit.block_end}).")
 
         callback_name = f"execute_{edit.type}"
         fn = self._registry.get(callback_name)
