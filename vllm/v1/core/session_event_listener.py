@@ -82,11 +82,11 @@ class SessionEventListener(Protocol):
         session_id: str | None = None,
         block_ids: list[int] = None,
         block_hashes: list[BlockHash] = None,
-    ) -> None: ...
+    ) -> int: ...
 
     def on_session_ttl_expired(
         self,
         session_id: str | None = None,
         block_ids: list[int] = None,
         block_hash: BlockHash | None = None,
-    ) -> None: ...
+    ) -> int: ...
