@@ -959,9 +959,16 @@ class SessionController:
         )
 
     def process_edit_index(self, edit:ContextManagementEditsParams, candidate_list: list[Any]) -> tuple[bool, str, list[Any]]:
-        if edit.target == "session" and (edit.block_start is None or edit.block_end is None):
+        if edit.target == "session" and edit.block_start is None:
             edit.block_start = 0
+
+        if edit.block_end is None:
             edit.block_end = len(candidate_list)
+
+        if edit.block_end <= edit.block_start:
+            fail_reason = f"block start {edit.block_start} is larger or equal to block end {edit.block_end}"
+            edit.block_start = edit.block_end = 0
+            return (False, fail_reason, [])
 
         if edit.block_end > len(candidate_list) or edit.block_start > len(candidate_list):
             logger.warning(f"edit index out of range: block end {edit.block_end} or block start {edit.block_start} "

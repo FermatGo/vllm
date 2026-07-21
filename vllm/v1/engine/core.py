@@ -346,6 +346,7 @@ class EngineCore:
         self.scheduler.register_request_context_management_edits(request.request_id,
                                                                  request.session_id, request.context_management)
         self.scheduler.add_request(request)
+        logger.info(f"================add req id {request.request_id} and num_prompt_tokens {request.num_prompt_tokens} prompt_token_ids is {request.prompt_token_ids}")
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
