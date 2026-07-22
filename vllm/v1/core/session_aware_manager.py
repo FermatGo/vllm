@@ -1035,8 +1035,7 @@ class SessionController:
                     fail_reason=f"No block record for session {session_id}"
                 )
             op_result, fail_reason, result_target = self.process_edit_index(edit, global_block_ids)
-            fn(session_id)
-            actual_process_blocks = edit.block_end - edit.block_start
+            actual_process_blocks = fn(session_id, result_target, is_session_op)
 
         return EditResponse(
             session_id=session_id,
