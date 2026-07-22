@@ -84,27 +84,14 @@ class SessionAwareManager:
         # 新增：事件监听器列表
         self._event_listeners: list[SessionEventListener] = []
 
-    def on_block_cache_hit_for_request(
-        self,
-        request: Request,
-        blocks: KVCacheBlocks
-    ) -> None:
-
-        logger.info(f'===== on_block_cache_hit_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
-
-        for group in blocks.get_block_ids():
-            for block_id in group:
-                self.on_block_cache_hit(
-                    session_id=request.session_id, 
-                    block_id=block_id,
-                    ephemeral_range=compute_ephemeral_range(request.cache_control)
-                )
-
     def on_blocks_allocated_for_request(
         self,
         request: Request,
         blocks: KVCacheBlocks
     ) -> None:
+        if request.session_id is None:
+            return
+        
         block_ids = [
             block_id
             for group in blocks.get_block_ids()
@@ -117,17 +104,34 @@ class SessionAwareManager:
             ephemeral_range=compute_ephemeral_range(request.cache_control),
         )
 
+    def on_block_cache_hit_for_request(
+        self,
+        request: Request,
+        blocks: KVCacheBlocks
+    ) -> None:
+
+        if request.session_id is None:
+            return
+
+        logger.info(f'===== on_block_cache_hit_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
+
+        for group in blocks.get_block_ids():
+            for block_id in group:
+                self.on_block_cache_hit(
+                    session_id=request.session_id, 
+                    parent_session_id=request.parent_session_id,
+                    block_id=block_id,
+                    ephemeral_range=compute_ephemeral_range(request.cache_control),
+                )
+
     def on_blocks_allocated(
         self,
         session_id: str | None,
-        parent_session_id: str,
+        parent_session_id: str | None,
         block_ids: list[int],
         ephemeral_range: EphemeralRange | None = None,
     ) -> None:
         """记录本轮刚刚变为完整状态的 cached blocks。"""
-
-        if session_id is None:
-            return
 
         self._ensure_session_registered(session_id, parent_session_id)
 
@@ -139,17 +143,26 @@ class SessionAwareManager:
         for block_id in block_ids:
             block = self.kv_cache_manager.block_pool.blocks[block_id]
 
-            # allocate_slots() 理论上只传有 hash 的 newly-cached block。
+            # allocate_slots() 理论上只传 newly-cached blocks。
+            # 保留检查用于防御异常情况。
             if block.block_hash is None:
                 logger.warning("Newly cached block %s has no block hash", block_id)
                 continue
 
-            # 防止重复回调造成重复引用。
-            if self._is_session_block_registered(session_id, block_id):
-                continue
+            block_hash = get_block_hash(block.block_hash)
 
-            # 当前 block 尚未插入，因此当前 session block 数量
-            # 就是该 block 插入后的 session block index。
+            # get_new_blocks() 已经清理 block._session_ref_cnt 和
+            # block._ttl_expire_at，但没有清理 SAM 双向索引和 TTLManager。
+            old_session_ids = list(self._block_sessions.get(block_id, {}).keys())
+
+            for old_session_id in old_session_ids:
+                self._ttl_manager.remove(block_id, old_session_id)
+
+            # 统一清理 SAM 中这个物理 block 的所有旧 session 引用。
+            self._clear_block_session_refs(block_id)
+
+            # 必须在清理旧引用之后计算。
+            # 当前 session 已经记录的 block 数，就是新 block 的逻辑 index。
             session_block_index = len(self._session_blocks.get(session_id, {}))
 
             is_ephemeral = (
@@ -165,17 +178,6 @@ class SessionAwareManager:
                 else 0.0
             )
 
-            block_hash = get_block_hash(block.block_hash)
-
-            # 清理物理 block 可能残留的旧 session 引用。
-            old_session_ids = list(self._block_sessions.get(block_id, {}).keys())
-            old_ref_count = len(old_session_ids)
-
-            for old_session_id in old_session_ids:
-                self._ttl_manager.remove(block_id, old_session_id)
-
-            self._clear_block_session_refs(block_id)
-
             record = SessionBlockRecord(
                 session_id=session_id,
                 block_id=block_id,
@@ -188,9 +190,18 @@ class SessionAwareManager:
             if is_ephemeral:
                 self._ttl_manager.register(block_id, session_id, ttl_expire_at)
 
+            # 不使用 old_ref_count：
+            # get_new_blocks() 已经把物理 block 的 session_ref_cnt 清零。
+            #
+            # 使用真实 metadata 做校准，可以兼容异常重复回调：
+            #   当前为 0 -> delta +1
+            #   当前为 1 -> delta  0
+            #   当前大于 1 -> 调整回 1
+            current_ref_count = block.num_session_refs
+
             self.kv_cache_manager.update_block_meta(
                 block_id,
-                delta_ref=1 - old_ref_count,
+                delta_ref=1 - current_ref_count,
                 ttl_expire_at=ttl_expire_at,
             )
 
@@ -207,13 +218,13 @@ class SessionAwareManager:
     def on_block_cache_hit(
         self,
         session_id: str | None,
+        parent_session_id: str | None,
         block_id: int,
         ephemeral_range: EphemeralRange | None = None,
     ) -> None:
         """prefix cache 命中时通知 SAM"""
-
-        if session_id is None:
-            return
+        
+        self._ensure_session_registered(session_id, parent_session_id)
 
         # 最新request的ttl时间
         now = time.monotonic()
@@ -347,8 +358,8 @@ class SessionAwareManager:
                 parent_session_id=parent_session_id,
                 created_at=time.monotonic(),
             )
-            # 如果有父 session，更新父 session 的 children
-            if parent_session_id and parent_session_id in self._sessions:
+            # 如果有父 session，更新父 session 的 children, children不能是自己
+            if parent_session_id and parent_session_id in self._sessions and parent_session_id != session_id:
                 self._sessions[parent_session_id].children.add(session_id)
 
     def _clear_block_session_refs(self, block_id: int) -> None:
@@ -480,20 +491,6 @@ class SessionAwareManager:
         #TODO: 后续返回当前session及其子session的block hash
         return len(block_hashes)
 
-    def _get_session_global_block_ids(self, session_id: str) -> list[int]:
-        blocks_result = []
-        if session_id in self._session_blocks:
-            blocks_result = list(self._session_blocks[session_id].keys())
-        return blocks_result
-
-
-    def _get_session_block_hash(self, session_id: str) -> list[BlockHash]:
-        if session_id in self._session_block_hash:
-            return self._session_block_hash[session_id]
-        else:
-            return []
-
-
     def _execute_evict(self, session_id: str, block_ids: list[int], is_session: bool) -> int:
         """驱逐指定范围的 block — 减少引用 + 清除当前session的TTL + 标记清除（session引用归0）
         清除本地引用，并通知 SPM 停止对应远端 PoolKey 的 Keep-Alive
@@ -560,6 +557,19 @@ class SessionAwareManager:
             )
 
         return res
+
+    def _get_session_global_block_ids(self, session_id: str) -> list[int]:
+        blocks_result = []
+        if session_id in self._session_blocks:
+            blocks_result = list(self._session_blocks[session_id].keys())
+        return blocks_result
+
+
+    def _get_session_block_hash(self, session_id: str) -> list[BlockHash]:
+        if session_id in self._session_block_hash:
+            return self._session_block_hash[session_id]
+        else:
+            return []
 
     def add_event_listener(self, listener: SessionEventListener):
         """注册事件监听器（SPM 调用）"""
