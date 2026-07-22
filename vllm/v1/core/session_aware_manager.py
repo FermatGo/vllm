@@ -1001,7 +1001,7 @@ class SessionController:
         actual_process_blocks = 0
         op_result = True
         fail_reason = ''
-        is_session_op = edit.type == "session"
+        is_session_op = edit.target == "session"
 
         if edit.type == "evict":
             global_block_ids = self._generate_global_ids(session_id)
