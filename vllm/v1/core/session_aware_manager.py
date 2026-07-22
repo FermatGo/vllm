@@ -382,24 +382,19 @@ class SessionAwareManager:
 
     def free_session(self, session_id: str) -> list:
         """清理指定 session 的所有 block 引用"""
-        freed_blocks = 0
-        orphaned_blocks = 0
 
         block_hashes = []
+        block_ids = []
 
         if session_id in self._session_blocks:
             for block_id in list(self._session_blocks[session_id].keys()):
                 self._remove_session_block_ref(session_id, block_id)
-                freed_blocks += 1
-
-                # 检查 block 是否已无任何 session 引用
-                if block_id not in self._block_sessions:
-                    orphaned_blocks += 1
 
                 self.kv_cache_manager.update_block_meta(block_id, delta_ref=-1)
 
                 block = self.kv_cache_manager.block_pool.blocks[block_id]
                 block_hashes.append(get_block_hash(block.block_hash))
+                block_ids.append(block_id)
                 
             if self._session_block_hash[session_id]:
                 del self._session_block_hash[session_id]
@@ -410,6 +405,8 @@ class SessionAwareManager:
             if parent_session_id and parent_session_id in self._sessions:
                 self._sessions[parent_session_id].children.discard(session_id)
             del self._sessions[session_id]
+
+        logger.info(f'free: session id:{session_id}, block id:{block_ids}')
 
         return block_hashes
 
@@ -434,9 +431,38 @@ class SessionAwareManager:
         return block_hashes_all
 
 
-    def _execute_offload(self, session_id: str) -> None:
+    def _execute_offload(self, session_id: str, block_ids: list[int], is_session: bool) -> int:
         """卸载指定范围的 block — 减少 session 引用 + 清除当前session的TTL（通知TTLManager）"""
-        return
+        affected_block_ids: list[int] = []
+        for block_id in block_ids:
+            cur_block_session = self._block_sessions.get(block_id, {})
+            record = cur_block_session.get(session_id)
+            if len(cur_block_session)==0 or record is None:
+                continue
+
+            if record.is_ephemeral:
+                self._ttl_manager.remove(block_id, session_id)
+
+            self._remove_session_block_ref(session_id, block_id)
+            
+            remaining_records = self._block_sessions.get(block_id, {}).values()
+            latest_ttl_expire_at = max(
+                (
+                    remaining_record.ttl_expire_at
+                    for remaining_record in remaining_records
+                ),
+                default=0.0,
+            )
+            self.kv_cache_manager.update_block_meta(
+                block_id,
+                delta_ref=-1,
+                ttl_expire_at=latest_ttl_expire_at,
+            )
+            affected_block_ids.append(block_id)
+        
+        res = len(affected_block_ids)
+
+        return res
 
     def _execute_prefetch(
             self,
