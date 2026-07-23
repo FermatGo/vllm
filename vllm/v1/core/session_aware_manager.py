@@ -101,7 +101,7 @@ class SessionAwareManager:
                 parent_session_id=request.parent_session_id,
                 block_ids=group,
                 ephemeral_range=compute_ephemeral_range(request.cache_control),
-                cached_blocks_len=cached_blocks_len_before(group_id) if cached_blocks_len_before else 0,
+                cached_blocks_len=cached_blocks_len_before[group_id] if cached_blocks_len_before else 0,
             )
 
     def on_block_cache_hit_for_request(
@@ -168,7 +168,7 @@ class SessionAwareManager:
             is_ephemeral = (
                 ephemeral_range is not None
                 and ephemeral_range.ttl > 0
-                and cached_blocks_len <= ephemeral_range.block_offset
+                and (cached_blocks_len + ind) <= ephemeral_range.block_offset
             )
 
             ttl_expire_at = (
