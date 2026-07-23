@@ -87,22 +87,22 @@ class SessionAwareManager:
     def on_blocks_allocated_for_request(
         self,
         request: Request,
-        blocks: KVCacheBlocks
+        blocks: KVCacheBlocks,
+        cached_blocks_len_before: tuple[int, ...] | None = None
     ) -> None:
         if request.session_id is None:
             return
-        
-        block_ids = [
-            block_id
-            for group in blocks.get_block_ids()
-            for block_id in group
-        ]
-        self.on_blocks_allocated(
-            session_id=request.session_id,
-            parent_session_id=request.parent_session_id,
-            block_ids=block_ids,
-            ephemeral_range=compute_ephemeral_range(request.cache_control),
-        )
+
+        logger.info(f'===== on_blocks_allocated_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
+
+        for group_id, group in enumerate(blocks.get_block_ids()):
+            self.on_blocks_allocated(
+                session_id=request.session_id,
+                parent_session_id=request.parent_session_id,
+                block_ids=group,
+                ephemeral_range=compute_ephemeral_range(request.cache_control),
+                cached_blocks_len=cached_blocks_len_before(group_id) if cached_blocks_len_before else 0,
+            )
 
     def on_block_cache_hit_for_request(
         self,
@@ -115,18 +115,13 @@ class SessionAwareManager:
 
         logger.info(f'===== on_block_cache_hit_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
 
-        block_ids = [
-            block_id
-            for group in blocks.get_block_ids()
-            for block_id in group
-        ]
-
-        self.on_block_cache_hit(
-            session_id=request.session_id, 
-            parent_session_id=request.parent_session_id,
-            block_id=block_ids,
-            ephemeral_range=compute_ephemeral_range(request.cache_control),
-        )
+        for group_id, group in enumerate(blocks.get_block_ids()):
+            self.on_blocks_cache_hit(
+                session_id=request.session_id, 
+                parent_session_id=request.parent_session_id,
+                block_ids=group,
+                ephemeral_range=compute_ephemeral_range(request.cache_control),
+            )
 
     def on_blocks_allocated(
         self,
@@ -134,6 +129,7 @@ class SessionAwareManager:
         parent_session_id: str | None,
         block_ids: list[int],
         ephemeral_range: EphemeralRange | None = None,
+        cached_blocks_len: int = 0,
     ) -> None:
         """记录本轮刚刚变为完整状态的 cached blocks。"""
 
@@ -172,7 +168,7 @@ class SessionAwareManager:
             is_ephemeral = (
                 ephemeral_range is not None
                 and ephemeral_range.ttl > 0
-                and ind <= ephemeral_range.block_offset
+                and cached_blocks_len <= ephemeral_range.block_offset
             )
 
             ttl_expire_at = (
@@ -218,7 +214,7 @@ class SessionAwareManager:
                 block_hashes=newly_protected_hashes,
             )
 
-    def on_block_cache_hit(
+    def on_blocks_cache_hit(
         self,
         session_id: str | None,
         parent_session_id: str | None,
