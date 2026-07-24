@@ -443,7 +443,7 @@ class Scheduler(SchedulerInterface):
 
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         tmp_req,
-                        num_new_tokens=total_external_matched_tokens,
+                        num_new_tokens=max(total_external_matched_tokens, 1),
                         num_new_computed_tokens=local_computed_tokens,
                         new_computed_blocks=local_blocks
                     )
