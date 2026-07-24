@@ -62,37 +62,56 @@ class SessionKeyTracker:
             with SessionKeyTracker._instance_lock:
                 if not hasattr(SessionKeyTracker, "_instance"):
                     SessionKeyTracker._instance = object.__new__(cls)
-                    SessionKeyTracker._instance._block_hashes: set[BlockHash] = set()
+                    SessionKeyTracker._instance._session_hashes: dict[str, list[BlockHash]] = {}
                     SessionKeyTracker._instance._lock = threading.Lock()
         return SessionKeyTracker._instance
 
-    def get_hashes(self) -> list[BlockHash]:
-        return list(self._block_hashes)
-    
+    def get_dicts(self) -> dict[str, list[BlockHash]]:
+        with self._lock:
+            return dict(self._session_hashes)
+
     def add_hashes(
         self,
+        session_id: str,
         block_hashes: list[BlockHash],
     ) -> None:
         with self._lock:
-            for block_hash in block_hashes:
-                self._block_hashes.add(block_hash)
-                logger.debug(f"SessionKeyTracker.add_hashes: block_hash saved: {block_hash}")
-    
+            self._session_hashes[session_id] = block_hashes
+            logger.info(f"SessionKeyTracker.add_hashes: session_id: {session_id}, block_hashes saved: {block_hashes}")
+            # for block_hash in block_hashes:
+            #     self._block_hashes.add(block_hash)
+            #     logger.debug(f"SessionKeyTracker.add_hashes: block_hash saved: {block_hash}")
+
     def remove_hashes(
         self,
+        session_id,
         block_hashes: list[BlockHash],
     ) -> int:
         removed_nums = 0
         with self._lock:
-            for block_hash in block_hashes:
-                if block_hash not in self._block_hashes:
-                    logger.info(f"SessionKeyTracker.remove_hash: block_hash not save: {block_hash}")
-                else:
-                    removed_nums = removed_nums + 1
-                    self._block_hashes.remove(block_hash)
-                    logger.debug(f"SessionKeyTracker.remove_hashes: block_hash removed: {block_hash}")
-        return removed_nums
+            # 异常处理
+            if session_id is None:
+                logger.warning("SessionKeyTracker.remove_hash: session_id cannot be None")
+                return removed_nums
+            if block_hashes is None or len(block_hashes) == 0:
+                logger.warning(f"SessionKeyTracker.remove_hash: invalid block_hashes {block_hashes}")
+                return removed_nums
+            list_hashes = self._session_hashes.get(session_id, [])
+            if not set(list_hashes).issubset(block_hashes):
+                logger.warning(f"SessionKeyTracker.remove_hash: invalid block_hashes {block_hashes} or invalid session_id: {session_id}")
+                return removed_nums
 
+            list_hashes = self._session_hashes.pop(session_id, [])
+            removed_nums = len(list_hashes)
+            logger.info(f"SessionKeyTracker.remove_hash: session_id: {session_id}, block_hashes removed: {list_hashes}")
+            # for block_hash in block_hashes:
+            #     if block_hash not in self._block_hashes:
+            #         logger.info(f"SessionKeyTracker.remove_hash: block_hash not save: {block_hash}")
+            #     else:
+            #         removed_nums = removed_nums + 1
+            #         self._block_hashes.remove(block_hash)
+            #         logger.debug(f"SessionKeyTracker.remove_hashes: block_hash removed: {block_hash}")
+        return removed_nums
 
 
 class KVCacheKeepAliveThread(threading.Thread):
@@ -118,17 +137,25 @@ class KVCacheKeepAliveThread(threading.Thread):
         #TODO: max keys改为chunk发送
         while not self._stopped.wait(self.interval):
             try:
-                hashes = self.tracker.get_hashes()
-                if not hashes:
+                dict_hashes = self.tracker.get_dicts()
+                if not dict_hashes:
                     continue
                 hints_block_nums = 0
-                for i in range(0, len(hashes), self.max_keys):
-                    batch = hashes[i:i+self.max_keys]
-                    nums = len(batch)
+                all_block_nums = 0
+                for session_id, hashes in dict_hashes.items():
+                    nums = len(hashes)
+                    all_block_nums = all_block_nums + nums
                     token_len = self.block_size * nums
-                    res = self.connector.look_up_keys(token_len, batch)
+                    res = self.connector.look_up_keys(token_len, hashes)
                     hints_block_nums = hints_block_nums + res // self.block_size
-                logger.info(f"KVCacheKeepAliveThread: all block numbers: {len(hashes)} hints block numbers: {hints_block_nums}")
+                logger.info(f"KVCacheKeepAliveThread: all blockes numbers: {all_block_nums}, hints block numbers: {hints_block_nums}")
+                # for i in range(0, len(hashes), self.max_keys):
+                #     batch = hashes[i:i+self.max_keys]
+                #     nums = len(batch)
+                #     token_len = self.block_size * nums
+                #     res = self.connector.look_up_keys(token_len, batch)
+                #     hints_block_nums = hints_block_nums + res // self.block_size
+                # logger.info(f"KVCacheKeepAliveThread: all block numbers: {len(hashes)} hints block numbers: {hints_block_nums}")
             except Exception as e:
                 logger.error("Keep-alive thread error: %s", e)
 
@@ -205,17 +232,19 @@ class SessionAwarePoolingManager(SessionEventListener):
     # 可以通过ascend的pool_worker的回调函数来调用key_tracker.add_keys
     def on_session_blocks_protected(
         self,
+        session_id,
         block_hashes: list[BlockHash],
     ) -> None:
         """block 保护"""
-        self.key_tracker.add_hashes(block_hashes)
+        self.key_tracker.add_hashes(session_id, block_hashes)
 
     def on_session_blocks_removed(
         self,
+        session_id,
         block_hashes: list[BlockHash],
     ) -> int:
         """block 移除"""
-        return self.key_tracker.remove_hashes(block_hashes)
+        return self.key_tracker.remove_hashes(session_id, block_hashes)
 
     # def on_session_cache_hit(
     #     self,
@@ -305,7 +334,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         if not block_ids:
             logger.warning("Session %s has no allocated blocks, skipping prefetch", prefetch_req.session_id)
             return
-        
+
         # 通过 KVPoolScheduler 注入 prefetch metadata
         self.connector.connector_scheduler.add_prefetch_request(
             prefetch_req, matched_tokens
@@ -374,12 +403,12 @@ class SessionAwarePoolingManager(SessionEventListener):
     def on_session_blocks_allocated(
         self,
         session_id: str | None = None,
-        block_ids: list[int] = None,
-        pool_keys: list[str] = None,       # 远端 PoolKey 列表（来自 AscendStoreConnector）
+        # block_ids: list[int] = None,
+        # pool_keys: list[str] = None,       # 远端 PoolKey 列表（来自 AscendStoreConnector）
         block_hashes: list[BlockHash] = None,    # 对应的 block hash
     ) -> None:
         return
-    
+
     def on_session_cache_hit(
         self,
         session_id: str | None = None,
@@ -387,15 +416,14 @@ class SessionAwarePoolingManager(SessionEventListener):
         block_hash: BlockHash | None = None,
     ) -> None:
         return
-    
+
     def on_session_ttl_expired(
         self,
         session_id: str | None = None,
-        block_ids: list[int] = None,
-        block_hash: BlockHash | None = None,
+        block_hash: list[BlockHash] | None = None,
     ) -> int:
-        return self.on_session_blocks_removed([block_hash])
-    
+        return self.on_session_blocks_removed(session_id, block_hash)
+
     def on_context_management_prefetch(
         self,
         session_id: str | None = None,
@@ -430,11 +458,10 @@ class SessionAwarePoolingManager(SessionEventListener):
             logger.warning(f"prefetch queue is reaching the max queue size {self.config.prefetch_max_queue_size} "
                            f"and failed to add to the queue")
             return False
-    
+
     def on_context_management_evict(
         self,
         session_id: str | None = None,
-        block_ids: list[int] = None,
         block_hashes: list[BlockHash] = None,
     ) -> int:
-        return self.on_session_blocks_removed(block_hashes)
+        return self.on_session_blocks_removed(session_id, block_hashes)
