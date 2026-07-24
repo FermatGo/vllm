@@ -59,6 +59,8 @@ class SessionAwareManager:
     # TODO：没空间是C区可开放，远程保持访问、保护
     def __init__(self, kv_cache_manager: KVCacheManager):
         self.kv_cache_manager = kv_cache_manager
+        self.num_kv_cache_groups = self.kv_cache_manager.num_kv_cache_groups
+        self.block_size = tuple(spec.block_size for spec in self.kv_cache_manager.coordinator.single_type_managers)
 
         # Session 注册表
         self._sessions: dict[str, SessionInfo] = {}
@@ -143,28 +145,28 @@ class SessionAwareManager:
         for ind, block_id in enumerate(block_ids):
             block = self.kv_cache_manager.block_pool.blocks[block_id]
 
-            # allocate_slots() 理论上只传 newly-cached blocks。
-            # 保留检查用于防御异常情况。
+            # allocate_slots() 理论上只传 newly-cached blocks. 保留检查用于防御异常情况。
             if block.block_hash is None:
                 logger.warning("Newly cached block %s has no block hash", block_id)
-                continue
+                break
 
+            # save hash for session_block_hash, which is used to notify SPM
             block_hash = get_block_hash(block.block_hash)
+            self._session_block_hash.setdefault(session_id, []).append(block_hash)
+            newly_protected_hashes.append(block_hash)            
 
             # get_new_blocks() 已经清理 block._session_ref_cnt 和
             # block._ttl_expire_at，但没有清理 SAM 双向索引和 TTLManager。
+            # 移除时间轮中旧的 session_id 记录
             old_session_ids = list(self._block_sessions.get(block_id, {}).keys())
-
             for old_session_id in old_session_ids:
                 self._ttl_manager.remove(block_id, old_session_id)
 
-            # 统一清理 SAM 中这个物理 block 的所有旧 session 引用。
+            # 清理 SAM 双向索引。
             self._clear_block_session_refs(block_id)
 
-            # 必须在清理旧引用之后计算。
-            # 当前 session 已经记录的 block 数，就是新 block 的逻辑 index。
-            # session_block_index = len(self._session_blocks.get(session_id, {}))
-
+            # 新增SAM记录，计算是否受 ephemeral 保护。
+            # ephemeral_range.block_offset 是相对于本次 request 的 block index，而不是全局 block index。
             is_ephemeral = (
                 ephemeral_range is not None
                 and ephemeral_range.ttl > 0
@@ -186,28 +188,20 @@ class SessionAwareManager:
             )
             self._add_session_block_ref(record)
 
+            # 注册到 TTLManager 以便后续过期回调。
             if is_ephemeral:
                 self._ttl_manager.register(block_id, session_id, ttl_expire_at)
 
-            # 不使用 old_ref_count：
             # get_new_blocks() 已经把物理 block 的 session_ref_cnt 清零。
-            #
             # 使用真实 metadata 做校准，可以兼容异常重复回调：
-            #   当前为 0 -> delta +1
-            #   当前为 1 -> delta  0
-            #   当前大于 1 -> 调整回 1
             current_ref_count = block.num_session_refs
-
             self.kv_cache_manager.update_block_meta(
                 block_id,
                 delta_ref=1 - current_ref_count,
                 ttl_expire_at=ttl_expire_at,
             )
 
-            self._session_block_hash.setdefault(session_id, []).append(block_hash)
-
-            newly_protected_hashes.append(block_hash)
-
+        # 通知 SPM 新增的 block_hashes
         if newly_protected_hashes:
             self._notify_event(
                 "session_blocks_protected",
@@ -231,7 +225,16 @@ class SessionAwareManager:
 
         for ind, block_id in enumerate(block_ids):
 
-            # session_block_index = len(self._session_blocks.get(session_id, {}))
+            # cache hit 的 block 应当已经完整且具有 hash, 无hash的block不建立 session引用
+            block = self.kv_cache_manager.block_pool.blocks[block_id]
+            if block.block_hash is None:
+                logger.warning("Cache-hit block %s has no block hash", block_id)
+                break
+
+            # save hash for session_block_hash, which is used to notify SPM
+            block_hash = get_block_hash(block.block_hash)
+            self._session_block_hash.setdefault(session_id, []).append(block_hash)
+            newly_protected_hashes.append(block_hash)
 
             is_ephemeral = (
                 ephemeral_range is not None
@@ -301,21 +304,6 @@ class SessionAwareManager:
                     delta_ref=+1,
                     ttl_expire_at=block_expire_at,
                 )
-
-            # cache hit 的 block 应当已经完整且具有 hash。
-            block = self.kv_cache_manager.block_pool.blocks[block_id]
-            if block.block_hash is None:
-                logger.warning(
-                    "Cache-hit block %s has no block hash; "
-                    "skip session_cache_hit notification",
-                    block_id,
-                )
-                return
-
-            block_hash = get_block_hash(block.block_hash)
-            self._session_block_hash.setdefault(session_id, []).append(block_hash)
-
-            newly_protected_hashes.append(block_hash)
 
         self._notify_event(
             "session_blocks_protected",
@@ -407,12 +395,11 @@ class SessionAwareManager:
 
                 self.kv_cache_manager.update_block_meta(block_id, delta_ref=-1)
 
-                block = self.kv_cache_manager.block_pool.blocks[block_id]
-                block_hashes.append(get_block_hash(block.block_hash))
                 block_ids.append(block_id)
                 
-            if self._session_block_hash[session_id]:
-                del self._session_block_hash[session_id]
+        if self._session_block_hash[session_id]:
+            block_hashes = self._session_block_hash[session_id]
+            del self._session_block_hash[session_id]
 
         # 移除 session 注册信息
         if session_id in self._sessions:
@@ -531,7 +518,7 @@ class SessionAwareManager:
 
                 # 只有当前session引用移除后，block无任何session引用时，才将其加入通知列表
                 block = self.kv_cache_manager.block_pool.blocks[block_id]
-                if block.num_session_refs == 0:
+                if (block.num_session_refs == 0) and (block.block_hash is not None):
                     block_hash = get_block_hash(block.block_hash)
                     affected_block_hashes.append(block_hash)
                     affected_block_ids.append(block_id)
