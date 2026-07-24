@@ -405,59 +405,57 @@ class Scheduler(SchedulerInterface):
                 local_blocks, local_computed_tokens = self.kv_cache_manager.get_computed_blocks(local_hit_req)
                 logger.info(f"prefetch req: local hit tokens num {local_computed_tokens} of total {tmp_prefetch_req.token_len}")
 
-                if local_computed_tokens == tmp_prefetch_req.token_len:
-                    # HDM有所有预取block hash，不进行预取
-                    process_prefetch_count += 1
-                    continue
-
+                # 获取本地命中block hash
                 local_hit_block_hashes = []
                 for block_seq in local_blocks.blocks:
                     for block in block_seq:
                         local_hit_block_hashes.append(get_block_hash(block.block_hash))
+                # 剩余未被命中、待预取block hash
                 remain_block_hashes = [block_hash for block_hash in tmp_prefetch_req.block_hashes
                                        if block_hash not in local_hit_block_hashes]
-
-                #查询远端剩余hash存活情况
                 exist_external_block_hash = []
                 total_external_matched_tokens = 0
-                for hash in remain_block_hashes:
-                    matched_tokens = self.session_pooling_manager._lookup_remote_cache(
-                        block_hashes=[hash],
-                        token_len=self.block_size,
+
+                if local_computed_tokens != tmp_prefetch_req.token_len:
+                    #查询远端剩余hash存活情况
+                    for hash in remain_block_hashes:
+                        matched_tokens = self.session_pooling_manager._lookup_remote_cache(
+                            block_hashes=[hash],
+                            token_len=self.block_size,
+                        )
+
+                        if matched_tokens > 0:
+                            exist_external_block_hash.append(hash)
+                            total_external_matched_tokens += matched_tokens
+                    logger.info(
+                        f"processing prefetch request {tmp_prefetch_req.request_id} session_id {tmp_prefetch_req.session_id} "
+                        f"total_external_matched_tokens {total_external_matched_tokens}")
+
+                if total_external_matched_tokens + local_computed_tokens > 0:
+                    # HBM/远端有命中，尝试分配KV
+                    tmp_req = Request(request_id=tmp_prefetch_req.request_id,
+                                      session_id = tmp_prefetch_req.session_id,
+                                      prompt_token_ids = [0] * (total_external_matched_tokens+local_computed_tokens),
+                                      sampling_params = SamplingParams.from_optional(),
+                                      pooling_params = None,
+                                      is_prefetch_req = True)
+                    tmp_req.block_hashes = local_hit_block_hashes.extend(exist_external_block_hash)
+
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        tmp_req,
+                        num_new_tokens=total_external_matched_tokens,
+                        num_new_computed_tokens=local_computed_tokens,
+                        new_computed_blocks=local_blocks
                     )
-
-                    if matched_tokens > 0:
-                        exist_external_block_hash.append(hash)
-                        total_external_matched_tokens += matched_tokens
-                logger.info(
-                    f"processing prefetch request {tmp_prefetch_req.request_id} session_id {tmp_prefetch_req.session_id} "
-                    f"total_external_matched_tokens {total_external_matched_tokens}")
-
-                if total_external_matched_tokens == 0:
-                    # 远端没有所有预取block hash，不进行预取
-                    process_prefetch_count += 1
-                    continue
-
-                tmp_req = Request(request_id=tmp_prefetch_req.request_id,
-                                  session_id = tmp_prefetch_req.session_id,
-                                  prompt_token_ids = [0] * total_external_matched_tokens,
-                                  sampling_params = SamplingParams.from_optional(),
-                                  pooling_params = None,
-                                  is_prefetch_req = True)
-                tmp_req.block_hashes = exist_external_block_hash
-
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    tmp_req,
-                    total_external_matched_tokens
-                )
-                if new_blocks:
-                    tmp_prefetch_req.dest_block_ids = new_blocks.get_block_ids()
-                    tmp_prefetch_req.token_len = total_external_matched_tokens
-                else:
-                    break
-                logger.info(f"new_blocks is {new_blocks} ids {tmp_prefetch_req.dest_block_ids}")
-                self.session_pooling_manager._submit_prefetch_to_scheduler(tmp_prefetch_req, total_external_matched_tokens)
-                self.session_pooling_manager.prefetch_running_queue.append(tmp_req)
+                    if new_blocks:
+                        tmp_prefetch_req.dest_block_ids = new_blocks.get_block_ids()
+                        tmp_prefetch_req.token_len = total_external_matched_tokens
+                    else:
+                        break
+                    logger.info(f"new_blocks is {new_blocks} ids {tmp_prefetch_req.dest_block_ids}")
+                    if total_external_matched_tokens > 0:
+                        self.session_pooling_manager._submit_prefetch_to_scheduler(tmp_prefetch_req, total_external_matched_tokens)
+                    self.session_pooling_manager.prefetch_running_queue.append(tmp_req)
                 process_prefetch_count += 1
             except Exception as e:
                 logger.error("Prefetch failed for request %s: %s",
