@@ -420,9 +420,9 @@ class SessionAwarePoolingManager(SessionEventListener):
     def on_session_ttl_expired(
         self,
         session_id: str | None = None,
-        block_hash: list[BlockHash] | None = None,
+        block_hashes: list[BlockHash] | None = None,
     ) -> int:
-        return self.on_session_blocks_removed(session_id, block_hash)
+        return self.on_session_blocks_removed(session_id, block_hashes)
 
     def on_context_management_prefetch(
         self,

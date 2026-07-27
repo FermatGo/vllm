@@ -310,7 +310,7 @@ class Scheduler(SchedulerInterface):
         else:
             self.session_pooling_manager = SessionAwarePoolingManager(self.session_aware_manager, self.connector)
             # TODO: 确认传入的blocksize是最小的hash block size
-            self.session_pooling_manager.block_size = self.hash_block_size
+            self.session_pooling_manager.block_size = hash_block_size
             self.session_pooling_manager.start()
             logger.info(f"Init session pooling manager self.block_size {self.block_size} hash_block_size {hash_block_size}")
 

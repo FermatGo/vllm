@@ -199,7 +199,7 @@ class SessionAwareManager:
             is_ephemeral = (
                 ephemeral_range is not None
                 and ephemeral_range.ttl > 0
-                and (cached_blocks_len + ind) <= ephemeral_range.block_offset
+                and self.block_size[group_id]//self.hash_block_size*(cached_blocks_len + ind) <= ephemeral_range.block_offset
             )
 
             ttl_expire_at = (
@@ -364,17 +364,6 @@ class SessionAwareManager:
             ttl_expire_at=0.0,
         )
 
-        block = self.kv_cache_manager.block_pool.blocks[block_id]
-        if not block.block_hash:
-            return
-        else:
-            block_hash = get_block_hash(block.block_hash)
-
-            # SAM 状态修改完成后再通知 SPM。
-            self._notify_event(
-                "session_ttl_expired",
-                block_hash=block_hash,
-            )
 
     def _ensure_session_registered(self, session_id: str, parent_session_id: str) -> None:
         """确保 session 已注册（SAM 内部）"""
@@ -873,7 +862,7 @@ class TTLManager:
                 self._entries[key] = entry
                 self._timer_wheel.insert(entry, expire_at)
             logger.info(f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
-            self._spm_notify_func("session_blocks_protected", session_id, block_info[1])
+            self._spm_notify_func("session_blocks_protected", session_id=session_id, block_hashes=block_info[1])
 
     def update(self, block_infos: list[tuple(int, list[BlockHash])], session_id: str,
                new_expire_at: float) -> None:
@@ -889,7 +878,7 @@ class TTLManager:
         if key in self._entries:
             entry = self._entries.pop(key)
             self._timer_wheel.remove(entry)
-            self._spm_notify_func("session_ttl_expired", session_id, entry.block_hashes)
+            self._spm_notify_func("session_ttl_expired", session_id=session_id, block_hashes=entry.block_hashes)
         else:
             logger.info(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
 
@@ -912,7 +901,7 @@ class TTLManager:
                 self._entries.pop(
                     (entry.block_id, entry.session_id), None)
                 self._on_expired(entry.block_id, entry.session_id)
-                self._spm_notify_func("session_ttl_expired", entry.session_id, entry.block_hashes)
+                self._spm_notify_func("session_ttl_expired", session_id=entry.session_id, block_hashes=entry.block_hashes)
 
 def example_expired_callback(block_id: int, session_id: str) -> None:
     logger.info(f"block_id {block_id} and session_id {session_id} is processing on TTL expiration")
