@@ -309,9 +309,10 @@ class Scheduler(SchedulerInterface):
             logger.warning(f"scheduler does not have connector, failed to init SPM")
         else:
             self.session_pooling_manager = SessionAwarePoolingManager(self.session_aware_manager, self.connector)
-            self.session_pooling_manager.block_size = self.block_size
+            # TODO: 确认传入的blocksize是最小的hash block size
+            self.session_pooling_manager.block_size = self.hash_block_size
             self.session_pooling_manager.start()
-            logger.info("Init session pooling manager")
+            logger.info(f"Init session pooling manager self.block_size {self.block_size} hash_block_size {hash_block_size}")
 
         self.kv_cache_manager.set_session_event_callbacks(
             on_blocks_allocated=self.session_aware_manager.on_blocks_allocated_for_request,

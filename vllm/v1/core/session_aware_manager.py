@@ -70,7 +70,7 @@ class SessionAwareManager:
         self._session_block_hash: dict[str, list[BlockHash]] = {}
 
         # TTL 管理器（定时轮）
-        self._ttl_manager = TTLManager(on_expired=self._on_ttl_expired)
+        self._ttl_manager = TTLManager(on_expired=self._on_ttl_expired, notify_func=self._notify_event)
 
         # Session 控制器
         self._session_controller = SessionController(
@@ -603,6 +603,7 @@ class TTLBlockEntry:
     block_id: int
     session_id: str
     ttl_expire_at: float
+    block_hashes: list[BlockHash]
 
 class TTLTimerWheel:
     """Best-effort timer wheel for TTL-protected free KV cache blocks.
@@ -730,30 +731,55 @@ class TTLTimerWheel:
         return expired
 
 class TTLManager:
-    """Block 级 TTL 管理器.
+    """Session block 的 TTL 管理器。
 
-    使用 ``(block_id, session_id)`` 作为键跟踪每个 block 的 TTL，
-    内部维护一个 TTLTimerWheel 用于高效发现过期 entry。当 entry
-    过期时调用初始化时传入的 ``on_expired`` 回调通知调用方。
+    为 session 中受 TTL 保护的 block 提供过期跟踪。每个 block 以
+    ``(block_id, session_id)`` 为键，绑定一个绝对过期时间
+    ``ttl_expire_at``。内部使用 TTLTimerWheel 做 best-effort 的
+    过期发现，配合 ``_entries`` 字典做精确校验。
+
+    核心流程：
+      1. **register** — 将 block 注册到 timer wheel，同时通知 SPM
+         该 block 处于 TTL 保护状态（"session_blocks_protected"）。
+         若同一 key 已存在且新过期时间更晚，则更新；否则保留旧值。
+      2. **tick** — 推进 timer wheel，收集已过期 entry。timer wheel
+         按 slot 收集，同一 slot 内可能包含尚未真正过期的 entry
+         （best-effort），因此 ``tick`` 会二次校验
+         ``now >= entry.ttl_expire_at``，仅对确认过期的 entry 执行
+         清理并回调 ``on_expired(block_id, session_id)``。
+      3. **remove** — 显式移除某个 block 的 TTL 跟踪（如 session
+         被主动释放），同时通知 SPM TTL 已失效
+         （"session_ttl_expired"）。
+
+    与 SPM 的交互：
+      - register 时通过 ``_spm_notify_func("session_blocks_protected", ...)``
+        通知 SPM block 处于 TTL 保护，避免 SPM 过早回收。
+      - 过期或 remove 时通过 ``_spm_notify_func("session_ttl_expired", ...)``
+        通知 SPM TTL 已失效，SPM 可据此决定是否回收该 session 的 block。
     """
 
-    def __init__(self, on_expired: Callable[[int, str], None]):
+    def __init__(self, on_expired: Callable[[int, str], None], notify_func: Callable[..., None],):
         """
         Parameters
         ----------
         on_expired : Callable[[int, str], None]
             Block 过期时的回调，签名为 ``on_expired(block_id, session_id)``。
-            调用方在此回调里执行实际的 zone 转换 / 资源回收。
+            调用方在此回调里执行实际的 block 释放 / zone 转换。
+        notify_func : Callable[..., None]
+            SPM 通知函数，用于向 SessionAwarePoolingManager 发送事件。
+            register 时发送 "session_blocks_protected"，过期/remove 时
+            发送 "session_ttl_expired"，使 SPM 感知 block 的 TTL 状态变化。
         """
         self._on_expired = on_expired
+        self._spm_notify_func = notify_func
         self._entries: dict[tuple[int, str], TTLBlockEntry] = {}
         self._timer_wheel = TTLTimerWheel(tick_count=3600)
 
         logger.info("TTLManager initialized with on_expired=%s",
                     getattr(on_expired, "__name__", repr(on_expired)))
 
-    def register(self, block_id: int, session_id: str,
-                 expire_at: float) -> None:
+    def register(self, block_infos: list[tuple(int, list[BlockHash])], session_id: str, expire_at: float) -> None:
+        #TODO: 待处理接口
         """注册或更新一个 block 的 TTL。
 
         如果 ``(block_id, session_id)`` 已存在：
@@ -762,27 +788,33 @@ class TTLManager:
           - 否则忽略（保留更晚的过期时间）。
         如果不存在：创建新的 TTLBlockEntry 并插入 timer wheel。
         """
-        key = (block_id, session_id)
-        if key in self._entries:
-            old_entry = self._entries[key]
-            if expire_at > old_entry.ttl_expire_at:
-                self._timer_wheel.remove(old_entry)
-                old_entry.ttl_expire_at = expire_at
-                self._timer_wheel.insert(old_entry, expire_at)
-        else:
-            entry = TTLBlockEntry(
-                block_id=block_id,
-                session_id=session_id,
-                ttl_expire_at=expire_at,
-            )
-            self._entries[key] = entry
-            self._timer_wheel.insert(entry, expire_at)
-        logger.info(f"Register block_id {block_id} and session id {session_id} with ttl {expire_at} in TTL Manager")
+        logger.info(f"TTL Manager: working to register {len(block_infos)} blocks into timer wheel")
+        for block_info in block_infos:
+            key = (block_info[0], session_id)
+            if key in self._entries:
+                old_entry = self._entries[key]
+                if expire_at > old_entry.ttl_expire_at:
+                    self._timer_wheel.remove(old_entry)
+                    old_entry.ttl_expire_at = expire_at
+                    old_entry.block_hashes = block_info[1]
+                    self._timer_wheel.insert(old_entry, expire_at)
 
-    def update(self, block_id: int, session_id: str,
+            else:
+                entry = TTLBlockEntry(
+                    block_id=block_info[0],
+                    session_id=session_id,
+                    ttl_expire_at=expire_at,
+                    block_hashes=block_info[1]
+                )
+                self._entries[key] = entry
+                self._timer_wheel.insert(entry, expire_at)
+            logger.info(f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
+            self._spm_notify_func("session_blocks_protected", session_id, block_info[1])
+
+    def update(self, block_infos: list[tuple(int, list[BlockHash])], session_id: str,
                new_expire_at: float) -> None:
         """更新 block 的 TTL，语义等同于 ``register``。"""
-        self.register(block_id, session_id, new_expire_at)
+        self.register(block_infos, session_id, new_expire_at)
 
     def remove(self, block_id: int, session_id: str) -> None:
         """显式移除一个 block 的 TTL 跟踪。
@@ -793,6 +825,7 @@ class TTLManager:
         if key in self._entries:
             entry = self._entries.pop(key)
             self._timer_wheel.remove(entry)
+            self._spm_notify_func("session_ttl_expired", session_id, entry.block_hashes)
         else:
             logger.info(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
 
@@ -815,6 +848,7 @@ class TTLManager:
                 self._entries.pop(
                     (entry.block_id, entry.session_id), None)
                 self._on_expired(entry.block_id, entry.session_id)
+                self._spm_notify_func("session_ttl_expired", entry.session_id, entry.block_hashes)
 
 def example_expired_callback(block_id: int, session_id: str) -> None:
     logger.info(f"block_id {block_id} and session_id {session_id} is processing on TTL expiration")
@@ -986,22 +1020,6 @@ class SessionController:
     # ------------------------------------------------------------------
     #  Internal
     # ------------------------------------------------------------------
-    def _generate_global_ids(self, session_id: str) -> list[int]:
-        callback_name = f"get_global_block_id_by_session"
-        fn = self._registry.get(callback_name)
-        global_block_ids = []
-        if fn is None:
-            logger.warning("No callback registered for get_global_block_id_by_session")
-            return global_block_ids
-        global_block_ids = fn(session_id)
-
-        if len(global_block_ids) == 0:
-            logger.warning(
-                f"Could not find session {session_id} with block ref record in SAM, failed to perform context management edit")
-            return global_block_ids
-
-        return global_block_ids
-
     def _execute_single_edit(
         self,
         edit: ContextManagementEditsParams,
@@ -1036,46 +1054,31 @@ class SessionController:
                 fail_reason=f"invalid edit type {edit.type}"
             )
 
-
-
         actual_process_blocks = 0
         op_result = True
         fail_reason = ''
         is_session_op = edit.target == "session"
 
-        if edit.type == "evict":
-            global_block_ids = self._generate_global_ids(session_id)
-            logger.info(
-                f"edit processing info: global_block_ids {global_block_ids} and process block num {len(global_block_ids)}")
-            if len(global_block_ids) == 0:
-                return EditResponse(
-                    session_id=session_id,
-                    type=edit.type,
-                    op_status=False,
-                    fail_reason=f"No block record for session {session_id}"
-                )
+        # TODO: 获取当前session 基础hash总长度
+        total_block_length = len(self._registry.get("get_block_hashes_by_session")(session_id, 0, -1))
+        logger.info(f"Process session {session_id} with lengh {total_block_length}")
+        op_result, fail_reason = self.process_edit_index(edit, total_block_length, session_id)
 
-            op_result, fail_reason, result_target = self.process_edit_index(edit, global_block_ids)
-            actual_process_blocks = fn(session_id, result_target, is_session_op)
-        elif edit.type == "prefetch":
-            callback_name = f"get_block_hashes_by_session"
-            get_block_hash_fn = self._registry.get(callback_name)
-            session_hashes = get_block_hash_fn(session_id)
-            logger.info(f"===============session_hashes {session_hashes}")
-            op_result, fail_reason, result_target = self.process_edit_index(edit, session_hashes)
-            logger.info(f"===============result_target {result_target}")
-            actual_process_blocks = fn(session_id, result_target)
-        else:
-            global_block_ids = self._generate_global_ids(session_id)
-            if len(global_block_ids) == 0:
-                return EditResponse(
-                    session_id=session_id,
-                    type=edit.type,
-                    op_status=False,
-                    fail_reason=f"No block record for session {session_id}"
-                )
-            op_result, fail_reason, result_target = self.process_edit_index(edit, global_block_ids)
-            actual_process_blocks = fn(session_id, result_target, is_session_op)
+        if op_result:
+            get_block_info_fn = None
+            if edit.type == "prefetch":
+                callback_name = f"get_block_hashes_by_session"
+                get_block_info_fn = self._registry.get(callback_name)
+            else:
+                callback_name = f"get_global_block_id_by_session"
+                get_block_info_fn = self._registry.get(callback_name)
+            if get_block_info_fn is not None:
+                process_session_block_info = get_block_info_fn(session_id, edit.block_start, edit.block_end)
+                process_num = 0
+                for info in process_session_block_info:
+                    process_num += len(info)
+                logger.info(f"session {session_id} session hash or block id count{process_num}")
+                actual_process_blocks = fn(session_id, process_session_block_info, is_session_op)
 
         return EditResponse(
             session_id=session_id,
@@ -1086,29 +1089,36 @@ class SessionController:
             fail_reason=fail_reason
         )
 
-    def process_edit_index(self, edit:ContextManagementEditsParams, candidate_list: list[Any]) -> tuple[bool, str, list[Any]]:
+    def process_edit_index(self, edit:ContextManagementEditsParams, candidate_list_length: int, session_id: str) -> tuple[bool, str]:
         if edit.block_start is None:
             edit.block_start = 0
 
         if edit.block_end is None:
-            edit.block_end = len(candidate_list)
+            edit.block_end = candidate_list_length
 
         #左闭右闭
         edit.block_end += 1
 
+        if candidate_list_length == 0:
+            edit.block_start = edit.block_end = 0
+            fail_reason = f"session_id {session_id} has {candidate_list_length} hash/block in SAM, fail to perform edit {edit.type}"
+            logger.warning(
+                f"Could not find session {session_id} with block ref record in SAM, failed to perform context management edit")
+            return (False, fail_reason)
+
         if edit.block_end < edit.block_start:
             fail_reason = f"block start {edit.block_start} is larger or equal to block end {edit.block_end}"
             edit.block_start = edit.block_end = 0
-            return (False, fail_reason, [])
+            return (False, fail_reason)
 
-        if edit.block_start > len(candidate_list):
+        if edit.block_start > candidate_list_length:
             logger.warning(f"edit index out of range: block end {edit.block_end} or block start {edit.block_start} "
-                           f"is out of index, the total kv length is {len(candidate_list)}, fail to perform edit {edit.type}")
-            fail_reason = f"block start {edit.block_start} or block end {edit.block_end} out of range {len(candidate_list)}"
+                           f"is out of index, the total kv length is {candidate_list_length}, fail to perform edit {edit.type}")
+            fail_reason = f"block start {edit.block_start} or block end {edit.block_end} out of range {candidate_list_length}"
             edit.block_start = edit.block_end = 0
-            return (False, fail_reason, [])
+            return (False, fail_reason)
 
-        return (True, '', candidate_list[edit.block_start:edit.block_end])
+        return (True, '')
 
 
 def compute_ephemeral_range(
