@@ -444,7 +444,7 @@ class KVCacheManager:
         )
         
         # cache_blocks() 会原地设置新完成 block 的 block_hash。
-        blocks_before_cache = self.coordinator.get_blocks(request.request_id)
+        blocks_for_current_request = self.coordinator.get_blocks(request.request_id)
 
         cached_blocks_len_before = tuple(
             sum(
@@ -453,7 +453,7 @@ class KVCacheManager:
                 if not block.is_null
                 and block.block_hash is not None
             )
-            for group in blocks_before_cache
+            for group in blocks_for_current_request
         )
 
         uncached_block_ids_before = tuple(
@@ -462,12 +462,10 @@ class KVCacheManager:
                 for block in group
                 if not block.is_null and block.block_hash is None
             }
-            for group in blocks_before_cache
+            for group in blocks_for_current_request
         )
 
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
-
-        current_blocks = self.coordinator.get_blocks(request.request_id)
 
         newly_cached_blocks = tuple(
             [
@@ -480,7 +478,7 @@ class KVCacheManager:
                 )
             ]
             for group, uncached_ids in zip(
-                current_blocks,
+                blocks_for_current_request,
                 uncached_block_ids_before,
             )
         )

@@ -519,6 +519,7 @@ class Scheduler(SchedulerInterface):
 
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            self.session_aware_manager._session_block_hash[request.session_id] = request.block_hashes
 
             # ===== schedule, request = <vllm.v1.request.Request object at 0xfffb38179b90>,
             # request.session_id = sub-1, request.parent_session_id = main-0, request.ttl = 10.0,
