@@ -145,6 +145,9 @@ class SessionAwareManager:
 
         logger.info(f'===== on_block_cache_hit_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
 
+        is_prefill = request.num_output_tokens == 0
+        logger.info(f'request.num_output_tokens: {request.num_output_tokens}')
+
         for group_id, group in enumerate(blocks.get_block_ids()):
             self.on_blocks_cache_hit(
                 group_id=group_id,
@@ -152,6 +155,7 @@ class SessionAwareManager:
                 parent_session_id=request.parent_session_id,
                 block_ids=group,
                 ephemeral_range=compute_ephemeral_range(request.cache_control),
+                is_prefill=is_prefill,
             )
 
     def on_blocks_allocated(
@@ -162,6 +166,7 @@ class SessionAwareManager:
         block_ids: list[int],
         ephemeral_range: EphemeralRange | None = None,
         cached_blocks_len: int = 0,
+        is_prefill: bool = True,
     ) -> None:
         """记录本轮刚刚变为完整状态的 cached blocks。"""
 
@@ -212,7 +217,7 @@ class SessionAwareManager:
             )
             self._add_session_block_ref(record, group_id)
 
-            if is_ephemeral:
+            if is_ephemeral and is_prefill:
                 newly_protected_hashes.append((block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                 newly_protected_ttl = ttl_expire_at
 
