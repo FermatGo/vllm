@@ -125,16 +125,15 @@ class SessionAwareManager:
         logger.info(f'===== on_blocks_allocated_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
         is_prefill = request.num_output_tokens == 0
         logger.info(f'request.num_output_tokens: {request.num_output_tokens}')
-        for group_id, group in enumerate(blocks.get_block_ids()):
-            self.on_blocks_allocated(
-                group_id=group_id,
-                session_id=request.session_id,
-                parent_session_id=request.parent_session_id,
-                block_ids=group,
-                ephemeral_range=compute_ephemeral_range(request.cache_control),
-                cached_blocks_len=cached_blocks_len_before[group_id] if cached_blocks_len_before else 0,
-                is_prefill=is_prefill,
-            )
+
+        self.on_blocks_allocated(
+            session_id=request.session_id,
+            parent_session_id=request.parent_session_id,
+            blocks=blocks,
+            ephemeral_range=compute_ephemeral_range(request.cache_control),
+            cached_blocks_len_before=cached_blocks_len_before,
+            is_prefill=is_prefill,
+        )
 
     def on_block_cache_hit_for_request(
         self,
@@ -147,23 +146,20 @@ class SessionAwareManager:
 
         logger.info(f'===== on_block_cache_hit_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
 
-        for group_id, group in enumerate(blocks.get_block_ids()):
-            self.on_blocks_cache_hit(
-                group_id=group_id,
-                session_id=request.session_id, 
-                parent_session_id=request.parent_session_id,
-                block_ids=group,
-                ephemeral_range=compute_ephemeral_range(request.cache_control)
-            )
+        self.on_blocks_cache_hit(
+            session_id=request.session_id, 
+            parent_session_id=request.parent_session_id,
+            blocks=blocks,
+            ephemeral_range=compute_ephemeral_range(request.cache_control)
+        )
 
     def on_blocks_allocated(
         self,
-        group_id: int,
         session_id: str | None,
         parent_session_id: str | None,
-        block_ids: list[int],
+        blocks: KVCacheBlocks,
         ephemeral_range: EphemeralRange | None = None,
-        cached_blocks_len: int = 0,
+        cached_blocks_len_before: tuple[int, ...] | None = None,
         is_prefill: bool = True,
     ) -> None:
         """记录本轮刚刚变为完整状态的 cached blocks。"""
@@ -174,72 +170,74 @@ class SessionAwareManager:
         newly_protected_hashes: list[tuple(int, list[BlockHash])] = []
         newly_protected_ttl: float = 0.0
 
-        logger.info("===== on_blocks_allocated, block_ids=%s", block_ids)
+        for group_id, block_ids in enumerate(blocks.get_block_ids()):
 
-        for ind, block_id in enumerate(block_ids):
-            block = self.kv_cache_manager.block_pool.blocks[block_id]
+            logger.info("===== on_blocks_allocated, block_ids=%s", block_ids)
+            cached_blocks_len = cached_blocks_len_before[group_id] if cached_blocks_len_before else 0
 
-            # allocate_slots理论上只传 newly-cached blocks，保留检查用于防御异常情况。
-            if block.block_hash is None:
-                logger.warning("Newly cached block %s has no block hash", block_id)
-                break
+            for ind, block_id in enumerate(block_ids):
+                block = self.kv_cache_manager.block_pool.blocks[block_id]
 
-            # get_new_blocks() 已经清理 block._session_ref_cnt 和
-            # block._ttl_expire_at，但没有清理 SAM 双向索引和 TTLManager。
-            old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
-            for old_session_id in old_session_ids:
-                self._ttl_manager.remove(block_id, old_session_id)
+                # allocate_slots理论上只传 newly-cached blocks，保留检查用于防御异常情况。
+                if block.block_hash is None:
+                    logger.warning("Newly cached block %s has no block hash", block_id)
+                    break
 
-            # 统一清理 SAM 中这个物理 block 的所有旧 session 引用。
-            self._clear_block_session_refs(block_id, group_id)
+                # get_new_blocks() 已经清理 block._session_ref_cnt 和
+                # block._ttl_expire_at，但没有清理 SAM 双向索引和 TTLManager。
+                old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
+                for old_session_id in old_session_ids:
+                    self._ttl_manager.remove(block_id, old_session_id)
 
-            # SessionBlockRecord所需参数计算
-            is_ephemeral = (
-                    ephemeral_range is not None
-                    and ephemeral_range.ttl > 0
-                    and self.block_size[group_id] // self.hash_block_size * (
-                                cached_blocks_len + ind) <= ephemeral_range.block_offset
-                    and is_prefill
-            )
+                # 统一清理 SAM 中这个物理 block 的所有旧 session 引用。
+                self._clear_block_session_refs(block_id, group_id)
 
-            ttl_expire_at = (
-                now + ephemeral_range.ttl
-                if is_ephemeral and ephemeral_range is not None
-                else 0.0
-            )
+                # SessionBlockRecord所需参数计算
+                is_ephemeral = (
+                        ephemeral_range is not None
+                        and ephemeral_range.ttl > 0
+                        and self.block_size[group_id] // self.hash_block_size * (
+                                    cached_blocks_len + ind) <= ephemeral_range.block_offset
+                        and is_prefill
+                )
 
-            record = SessionBlockRecord(
-                session_id=session_id,
-                block_id=block_id,
-                is_ephemeral=is_ephemeral,
-                ttl_expire_at=ttl_expire_at,
-                created_at=now,
-            )
-            self._add_session_block_ref(record, group_id)
+                ttl_expire_at = (
+                    now + ephemeral_range.ttl
+                    if is_ephemeral and ephemeral_range is not None
+                    else 0.0
+                )
 
-            if is_ephemeral:
-                newly_protected_hashes.append(
-                    (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
-                newly_protected_ttl = ttl_expire_at
+                record = SessionBlockRecord(
+                    session_id=session_id,
+                    block_id=block_id,
+                    is_ephemeral=is_ephemeral,
+                    ttl_expire_at=ttl_expire_at,
+                    created_at=now,
+                )
+                self._add_session_block_ref(record, group_id)
 
-            # get_new_blocks，已经把物理 block 的 session_ref_cnt 清零。
-            # 使用真实 metadata 做校准，可以兼容异常重复回调：
-            current_ref_count = block.num_session_refs
-            self.kv_cache_manager.update_block_meta(
-                block_id,
-                delta_ref=1 - current_ref_count,
-                ttl_expire_at=ttl_expire_at,
-            )
+                if is_ephemeral:
+                    newly_protected_hashes.append(
+                        (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
+                    newly_protected_ttl = ttl_expire_at
+
+                # get_new_blocks，已经把物理 block 的 session_ref_cnt 清零。
+                # 使用真实 metadata 做校准，可以兼容异常重复回调：
+                current_ref_count = block.num_session_refs
+                self.kv_cache_manager.update_block_meta(
+                    block_id,
+                    delta_ref=1 - current_ref_count,
+                    ttl_expire_at=ttl_expire_at,
+                )
 
         self._ttl_manager.register(block_infos=newly_protected_hashes, session_id=session_id,
                                    expire_at=newly_protected_ttl, finished_registration=True)
 
     def on_blocks_cache_hit(
         self,
-        group_id: int,
         session_id: str | None,
         parent_session_id: str | None,
-        block_ids: list[int],
+        blocks: KVCacheBlocks,
         ephemeral_range: EphemeralRange | None = None,
     ) -> None:
         """prefix cache 命中时通知 SAM"""
@@ -251,87 +249,89 @@ class SessionAwareManager:
         newly_protected_hashes: list[tuple(int, list[BlockHash])] = []
         newly_protected_ttl: float = 0.0
 
-        for ind, block_id in enumerate(block_ids):
-            # cache hit 的 block 应当已经完整且具有 hash。
-            block = self.kv_cache_manager.block_pool.blocks[block_id]
-            if block.block_hash is None:
-                logger.warning(
-                    "Cache-hit block %s has no block hash; ", block_id)
-                break
+        for group_id, block_ids in enumerate(blocks.get_block_ids()):
 
-            # 命中后SessionBlockRecord要刷新的参数
-            is_ephemeral = (
-                    ephemeral_range is not None
-                    and ephemeral_range.ttl > 0
-                    and self.block_size[group_id] // self.hash_block_size * ind <= ephemeral_range.block_offset
-            )
-            requested_expire_at = (
-                now + ephemeral_range.ttl
-                if is_ephemeral and ephemeral_range is not None
-                else 0.0
-            )
+            for ind, block_id in enumerate(block_ids):
+                # cache hit 的 block 应当已经完整且具有 hash。
+                block = self.kv_cache_manager.block_pool.blocks[block_id]
+                if block.block_hash is None:
+                    logger.warning(
+                        "Cache-hit block %s has no block hash; ", block_id)
+                    break
 
-            # 检查 session 是否已注册对 block 的引用
-            is_registered = self._is_session_block_registered(session_id, block_id, group_id)
+                # 命中后SessionBlockRecord要刷新的参数
+                is_ephemeral = (
+                        ephemeral_range is not None
+                        and ephemeral_range.ttl > 0
+                        and self.block_size[group_id] // self.hash_block_size * ind <= ephemeral_range.block_offset
+                )
+                requested_expire_at = (
+                    now + ephemeral_range.ttl
+                    if is_ephemeral and ephemeral_range is not None
+                    else 0.0
+                )
 
-            # 如果已注册，刷新 TTL
-            if is_registered:
-                record = self._session_blocks[group_id][session_id][block_id]
+                # 检查 session 是否已注册对 block 的引用
+                is_registered = self._is_session_block_registered(session_id, block_id, group_id)
 
-                # 刷新TTL, session引用中的刷新为本次的；block本身的刷新为最长的那个
-                if is_ephemeral:
-                    new_expire_at = max(record.ttl_expire_at, requested_expire_at)
+                # 如果已注册，刷新 TTL
+                if is_registered:
+                    record = self._session_blocks[group_id][session_id][block_id]
 
-                    record.is_ephemeral = True
-                    record.ttl_expire_at = new_expire_at
+                    # 刷新TTL, session引用中的刷新为本次的；block本身的刷新为最长的那个
+                    if is_ephemeral:
+                        new_expire_at = max(record.ttl_expire_at, requested_expire_at)
 
-                    # 刷新双向索引，确保两边引用同一个最新 record。
+                        record.is_ephemeral = True
+                        record.ttl_expire_at = new_expire_at
+
+                        # 刷新双向索引，确保两边引用同一个最新 record。
+                        self._add_session_block_ref(record, group_id)
+
+                        # self._ttl_manager.update(block_id, session_id, new_expire_at)
+                        newly_protected_hashes.append(
+                            (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
+                        newly_protected_ttl = new_expire_at
+
+                        # 一个 block 可能被多个 session 引用，block metadata 应使用
+                        # 所有 session 记录中最晚的过期时间。
+                        block_expire_at = max(
+                            item.ttl_expire_at
+                            for item in self._block_sessions[group_id][block_id].values()
+                        )
+                        self.kv_cache_manager.update_block_meta(
+                            block_id,
+                            ttl_expire_at=block_expire_at,
+                        )
+                # 未注册则创建新的引用记录
+                else:
+                    record = SessionBlockRecord(
+                        session_id=session_id,
+                        block_id=block_id,
+                        is_ephemeral=is_ephemeral,
+                        ttl_expire_at=requested_expire_at,
+                        created_at=now,
+                    )
                     self._add_session_block_ref(record, group_id)
 
-                    # self._ttl_manager.update(block_id, session_id, new_expire_at)
-                    newly_protected_hashes.append(
-                        (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
-                    newly_protected_ttl = new_expire_at
+                    if is_ephemeral:
+                        newly_protected_hashes.append(
+                            (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
+                        newly_protected_ttl = requested_expire_at
 
-                    # 一个 block 可能被多个 session 引用，block metadata 应使用
-                    # 所有 session 记录中最晚的过期时间。
-                    block_expire_at = max(
-                        item.ttl_expire_at
-                        for item in self._block_sessions[group_id][block_id].values()
-                    )
+                        block_expire_at = max(
+                            item.ttl_expire_at
+                            for item in self._block_sessions[group_id][block_id].values()
+                        )
+                    else:
+                        # None 表示不覆盖其他 session 已经设置的 block TTL。
+                        block_expire_at = None
+
                     self.kv_cache_manager.update_block_meta(
                         block_id,
+                        delta_ref=+1,
                         ttl_expire_at=block_expire_at,
                     )
-            # 未注册则创建新的引用记录
-            else:
-                record = SessionBlockRecord(
-                    session_id=session_id,
-                    block_id=block_id,
-                    is_ephemeral=is_ephemeral,
-                    ttl_expire_at=requested_expire_at,
-                    created_at=now,
-                )
-                self._add_session_block_ref(record, group_id)
-
-                if is_ephemeral:
-                    newly_protected_hashes.append(
-                        (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
-                    newly_protected_ttl = requested_expire_at
-
-                    block_expire_at = max(
-                        item.ttl_expire_at
-                        for item in self._block_sessions[group_id][block_id].values()
-                    )
-                else:
-                    # None 表示不覆盖其他 session 已经设置的 block TTL。
-                    block_expire_at = None
-
-                self.kv_cache_manager.update_block_meta(
-                    block_id,
-                    delta_ref=+1,
-                    ttl_expire_at=block_expire_at,
-                )
 
         self._ttl_manager.register(newly_protected_hashes, session_id, newly_protected_ttl)
 
