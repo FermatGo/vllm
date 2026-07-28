@@ -123,7 +123,8 @@ class SessionAwareManager:
             return
 
         logger.info(f'===== on_blocks_allocated_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
-
+        is_prefill = request.num_output_tokens == 0
+        logger.info(f'request.num_output_tokens: {request.num_output_tokens}')
         for group_id, group in enumerate(blocks.get_block_ids()):
             self.on_blocks_allocated(
                 group_id=group_id,
@@ -132,6 +133,7 @@ class SessionAwareManager:
                 block_ids=group,
                 ephemeral_range=compute_ephemeral_range(request.cache_control),
                 cached_blocks_len=cached_blocks_len_before[group_id] if cached_blocks_len_before else 0,
+                is_prefill=is_prefill,
             )
 
     def on_block_cache_hit_for_request(
@@ -145,17 +147,13 @@ class SessionAwareManager:
 
         logger.info(f'===== on_block_cache_hit_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
 
-        is_prefill = request.num_output_tokens == 0
-        logger.info(f'request.num_output_tokens: {request.num_output_tokens}')
-
         for group_id, group in enumerate(blocks.get_block_ids()):
             self.on_blocks_cache_hit(
                 group_id=group_id,
                 session_id=request.session_id, 
                 parent_session_id=request.parent_session_id,
                 block_ids=group,
-                ephemeral_range=compute_ephemeral_range(request.cache_control),
-                is_prefill=is_prefill,
+                ephemeral_range=compute_ephemeral_range(request.cache_control)
             )
 
     def on_blocks_allocated(
@@ -197,9 +195,11 @@ class SessionAwareManager:
 
             # SessionBlockRecord所需参数计算
             is_ephemeral = (
-                ephemeral_range is not None
-                and ephemeral_range.ttl > 0
-                and self.block_size[group_id]//self.hash_block_size*(cached_blocks_len + ind) <= ephemeral_range.block_offset
+                    ephemeral_range is not None
+                    and ephemeral_range.ttl > 0
+                    and self.block_size[group_id] // self.hash_block_size * (
+                                cached_blocks_len + ind) <= ephemeral_range.block_offset
+                    and is_prefill
             )
 
             ttl_expire_at = (
@@ -217,8 +217,9 @@ class SessionAwareManager:
             )
             self._add_session_block_ref(record, group_id)
 
-            if is_ephemeral and is_prefill:
-                newly_protected_hashes.append((block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
+            if is_ephemeral:
+                newly_protected_hashes.append(
+                    (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                 newly_protected_ttl = ttl_expire_at
 
             # get_new_blocks，已经把物理 block 的 session_ref_cnt 清零。
@@ -230,7 +231,8 @@ class SessionAwareManager:
                 ttl_expire_at=ttl_expire_at,
             )
 
-        self._ttl_manager.register(newly_protected_hashes, session_id, newly_protected_ttl)
+        self._ttl_manager.register(block_infos=newly_protected_hashes, session_id=session_id,
+                                   expire_at=newly_protected_ttl, finished_registration=True)
 
     def on_blocks_cache_hit(
         self,
@@ -259,9 +261,9 @@ class SessionAwareManager:
 
             # 命中后SessionBlockRecord要刷新的参数
             is_ephemeral = (
-                ephemeral_range is not None
-                and ephemeral_range.ttl > 0
-                and ind <= ephemeral_range.block_offset
+                    ephemeral_range is not None
+                    and ephemeral_range.ttl > 0
+                    and self.block_size[group_id] // self.hash_block_size * ind <= ephemeral_range.block_offset
             )
             requested_expire_at = (
                 now + ephemeral_range.ttl
@@ -287,9 +289,9 @@ class SessionAwareManager:
                     self._add_session_block_ref(record, group_id)
 
                     # self._ttl_manager.update(block_id, session_id, new_expire_at)
-                    newly_protected_hashes.append((block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
+                    newly_protected_hashes.append(
+                        (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                     newly_protected_ttl = new_expire_at
-
 
                     # 一个 block 可能被多个 session 引用，block metadata 应使用
                     # 所有 session 记录中最晚的过期时间。
@@ -313,7 +315,8 @@ class SessionAwareManager:
                 self._add_session_block_ref(record, group_id)
 
                 if is_ephemeral:
-                    newly_protected_hashes.append((block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
+                    newly_protected_hashes.append(
+                        (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                     newly_protected_ttl = requested_expire_at
 
                     block_expire_at = max(
@@ -331,7 +334,6 @@ class SessionAwareManager:
                 )
 
         self._ttl_manager.register(newly_protected_hashes, session_id, newly_protected_ttl)
-
 
     def _on_ttl_expired(self, block_id: int, session_id: str) -> None:
         """ephemeral block TTL 到期回调"""
@@ -363,7 +365,6 @@ class SessionAwareManager:
             delta_ref=-1,
             ttl_expire_at=0.0,
         )
-
 
     def _ensure_session_registered(self, session_id: str, parent_session_id: str) -> None:
         """确保 session 已注册（SAM 内部）"""
@@ -422,7 +423,8 @@ class SessionAwareManager:
                         self._ttl_manager.remove(block_id, session_id)
 
                         block = self.kv_cache_manager.block_pool.blocks[block_id]
-                        block_hashes.extend(split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
+                        block_hashes.extend(
+                            split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
 
                     self._remove_session_block_ref(session_id, block_id, group_id)
 
@@ -438,7 +440,7 @@ class SessionAwareManager:
                     self.kv_cache_manager.update_block_meta(block_id, delta_ref=-1, ttl_expire_at=latest_ttl_expire_at)
 
                     block_ids.append(block_id)
-                    
+
             if self._session_block_hash[session_id]:
                 block_hashes = self._session_block_hash[session_id]
                 del self._session_block_hash[session_id]
@@ -474,7 +476,6 @@ class SessionAwareManager:
 
         return block_hashes_all
 
-
     def _execute_offload(self, session_id: str, block_ids_all_group: tuple[list[int], ...], is_session: bool) -> int:
         """卸载指定范围的 block — 减少 session 引用 + 清除当前session的TTL（通知TTLManager）"""
         affected_block_hashes: list[BlockHash] = []
@@ -488,17 +489,18 @@ class SessionAwareManager:
             for block_id in block_ids:
                 cur_block_session = self._block_sessions[group_id].get(block_id, {})
                 record = cur_block_session.get(session_id)
-                if len(cur_block_session)==0 or record is None:
+                if len(cur_block_session) == 0 or record is None:
                     continue
 
                 if record.is_ephemeral:
-                    self._ttl_manager.remove(block_id, session_id)
+                    self._ttl_manager.remove(block_id=block_id, session_id=session_id, is_notify_spm=False)
 
                     block = self.kv_cache_manager.block_pool.blocks[block_id]
-                    affected_block_hashes.extend(split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
+                    affected_block_hashes.extend(
+                        split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
 
                 self._remove_session_block_ref(session_id, block_id, group_id)
-                
+
                 remaining_records = self._block_sessions[group_id].get(block_id, {}).values()
                 latest_ttl_expire_at = max(
                     (
@@ -512,7 +514,7 @@ class SessionAwareManager:
                     delta_ref=-1,
                     ttl_expire_at=latest_ttl_expire_at,
                 )
-        
+
         res = len(affected_block_hashes)
 
         return res
@@ -529,7 +531,7 @@ class SessionAwareManager:
             session_id=session_id,
             block_hashes=block_hashes,
         )
-        #TODO: 后续返回当前session及其子session的block hash
+        # TODO: 后续返回当前session及其子session的block hash
         return len(block_hashes)
 
     def _execute_evict(self, session_id: str, block_ids_all_group: tuple[list[int], ...], is_session: bool) -> int:
@@ -549,14 +551,15 @@ class SessionAwareManager:
                 for block_id in block_ids:
                     cur_block_session = self._block_sessions[group_id].get(block_id, {})
                     record = cur_block_session.get(session_id)
-                    if len(cur_block_session)==0 or record is None:
+                    if len(cur_block_session) == 0 or record is None:
                         continue
 
                     if record.is_ephemeral:
                         self._ttl_manager.remove(block_id, session_id)
 
                         block = self.kv_cache_manager.block_pool.blocks[block_id]
-                        affected_block_hashes.extend(split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
+                        affected_block_hashes.extend(
+                            split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
 
                     self._remove_session_block_ref(session_id, block_id, group_id)
                     
@@ -607,23 +610,23 @@ class SessionAwareManager:
                 group_block_end = min(group_block_end, len(group_block_hash) - 1)
 
                 # 获取当前session的所有block的block_id
-                group_session_blocks_ids = [ _ for _ in self._session_blocks[group_id][session_id]]
+                group_session_blocks_ids = [_ for _ in self._session_blocks[group_id][session_id]]
                 # 获取当前session的所有block的block_hash, 通过前面获取的block_id获取
-                group_session_blocks_hashes = [get_block_hash(self.kv_cache_manager.block_pool.blocks[_].block_hash) for _ in group_session_blocks_ids]
+                group_session_blocks_hashes = [get_block_hash(self.kv_cache_manager.block_pool.blocks[_].block_hash) for
+                                               _ in group_session_blocks_ids]
 
                 # group_block_start 到 group_block_end 的转换后的
                 for ind in range(group_block_start, group_block_end):
                     if group_block_hash[ind] in group_session_blocks_hashes:
                         hash_ind = group_session_blocks_hashes.index(group_block_hash[ind])
-                        block_ids_result[group_id].append(group_session_blocks_ids[hash_ind])                      
-            
-        return block_ids_result
+                        block_ids_result[group_id].append(group_session_blocks_ids[hash_ind])
 
+        return block_ids_result
 
     def _get_session_block_hash(self, session_id: str, block_start: int, block_end: int) -> list[BlockHash]:
         if session_id in self._session_block_hash:
             block_hash_len = len(self._session_block_hash[session_id])
-            assert block_start >=0 and block_end <= block_hash_len
+            assert block_start >= 0 and block_end <= block_hash_len
             return self._session_block_hash[session_id][block_start:block_end]
         else:
             return []
@@ -657,6 +660,7 @@ class TTLBlockEntry:
     session_id: str
     ttl_expire_at: float
     block_hashes: list[BlockHash]
+
 
 class TTLTimerWheel:
     """Best-effort timer wheel for TTL-protected free KV cache blocks.
@@ -827,12 +831,14 @@ class TTLManager:
         self._spm_notify_func = notify_func
         self._entries: dict[tuple[int, str], TTLBlockEntry] = {}
         self._timer_wheel = TTLTimerWheel(tick_count=3600)
+        self.waiting_block_hashes = set()
 
         logger.info("TTLManager initialized with on_expired=%s",
                     getattr(on_expired, "__name__", repr(on_expired)))
 
-    def register(self, block_infos: list[tuple(int, list[BlockHash])], session_id: str, expire_at: float) -> None:
-        #TODO: 待处理接口
+    def register(self, block_infos: list[tuple(int, list[BlockHash])], session_id: str, expire_at: float,
+                 finished_registration: bool = False) -> None:
+        # TODO: 待处理接口
         """注册或更新一个 block 的 TTL。
 
         如果 ``(block_id, session_id)`` 已存在：
@@ -841,6 +847,9 @@ class TTLManager:
           - 否则忽略（保留更晚的过期时间）。
         如果不存在：创建新的 TTLBlockEntry 并插入 timer wheel。
         """
+        if not finished_registration:
+            self.waiting_block_hashes = set()
+
         logger.info(f"TTL Manager: working to register {len(block_infos)} blocks into timer wheel")
         for block_info in block_infos:
             key = (block_info[0], session_id)
@@ -861,26 +870,36 @@ class TTLManager:
                 )
                 self._entries[key] = entry
                 self._timer_wheel.insert(entry, expire_at)
-            logger.info(f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
-            self._spm_notify_func("session_blocks_protected", session_id=session_id, block_hashes=block_info[1])
+            logger.info(
+                f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
+            self.waiting_block_hashes.update(block_info[1])
+
+        if finished_registration and len(self.waiting_block_hashes) > 0:
+            self._spm_notify_func("session_blocks_protected", session_id=session_id,
+                                  block_hashes=self.waiting_block_hashes)
+            self.waiting_block_hashes = set()
 
     def update(self, block_infos: list[tuple(int, list[BlockHash])], session_id: str,
                new_expire_at: float) -> None:
         """更新 block 的 TTL，语义等同于 ``register``。"""
         self.register(block_infos, session_id, new_expire_at)
 
-    def remove(self, block_id: int, session_id: str) -> None:
+    def remove(self, block_id: int, session_id: str, is_notify_spm: bool = True) -> None:
         """显式移除一个 block 的 TTL 跟踪。
 
         同时从 ``_entries`` 和 timer wheel 中删除。如果不存在则静默忽略。
         """
         key = (block_id, session_id)
+        remove_hashes = set()
         if key in self._entries:
             entry = self._entries.pop(key)
             self._timer_wheel.remove(entry)
-            self._spm_notify_func("session_ttl_expired", session_id=session_id, block_hashes=entry.block_hashes)
+            remove_hashes.update(entry.block_hashes)
         else:
             logger.info(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
+
+        if is_notify_spm:
+            self._spm_notify_func("session_ttl_expired", session_id=session_id, block_hashes=list(remove_hashes))
 
     def tick(self, now: float | None = None) -> None:
         """推进 timer wheel，处理所有已过期的 entry。
@@ -901,13 +920,14 @@ class TTLManager:
                 self._entries.pop(
                     (entry.block_id, entry.session_id), None)
                 self._on_expired(entry.block_id, entry.session_id)
-                self._spm_notify_func("session_ttl_expired", session_id=entry.session_id, block_hashes=entry.block_hashes)
+                self._spm_notify_func("session_ttl_expired", session_id=entry.session_id,
+                                      block_hashes=entry.block_hashes)
 
 def example_expired_callback(block_id: int, session_id: str) -> None:
     logger.info(f"block_id {block_id} and session_id {session_id} is processing on TTL expiration")
 
 class SessionController:
-    #TODO: 考虑预取请求有content / session已被清理，重新计算hash
+    # TODO: 考虑预取请求有content / session已被清理，重新计算hash
     """Context management edits 执行器。
 
     处理请求携带的 context_management.edits，根据
@@ -1149,7 +1169,7 @@ class SessionController:
         if edit.block_end is None:
             edit.block_end = candidate_list_length
 
-        #左闭右闭
+        # 左闭右闭
         edit.block_end += 1
 
         if candidate_list_length == 0:
@@ -1175,7 +1195,7 @@ class SessionController:
 
 
 def compute_ephemeral_range(
-    cache_control: CacheControlParams,
+        cache_control: CacheControlParams,
 ) -> EphemeralRange | None:
     if cache_control is None:
         return None
