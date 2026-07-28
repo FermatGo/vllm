@@ -409,11 +409,10 @@ class SessionAwareManager:
 
     def free_session(self, session_id: str) -> list:
         """清理指定 session 的所有 block 引用"""
-
         block_hashes = []
-        block_ids = []
 
         for group_id in range(self.num_kv_cache_groups):
+            block_ids = []
             if session_id in self._session_blocks[group_id]:
                 for block_id in list(self._session_blocks[group_id][session_id].keys()):
 
@@ -421,10 +420,6 @@ class SessionAwareManager:
                     record = cur_block_session.get(session_id)
                     if record and record.is_ephemeral:
                         self._ttl_manager.remove(block_id, session_id)
-
-                        block = self.kv_cache_manager.block_pool.blocks[block_id]
-                        block_hashes.extend(
-                            split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
 
                     self._remove_session_block_ref(session_id, block_id, group_id)
 
@@ -440,19 +435,18 @@ class SessionAwareManager:
                     self.kv_cache_manager.update_block_meta(block_id, delta_ref=-1, ttl_expire_at=latest_ttl_expire_at)
 
                     block_ids.append(block_id)
-
-            if self._session_block_hash[session_id]:
-                block_hashes = self._session_block_hash[session_id]
-                del self._session_block_hash[session_id]
-
-            # 移除 session 注册信息
-            if session_id in self._sessions:
-                parent_session_id = self._sessions[session_id].parent_session_id
-                if parent_session_id and parent_session_id in self._sessions:
-                    self._sessions[parent_session_id].children.discard(session_id)
-                del self._sessions[session_id]
-
             logger.info(f'free: session id:{session_id}, group_id:{group_id}, block id:{block_ids}')
+
+        if session_id in self._session_block_hash:
+            block_hashes = self._session_block_hash[session_id]
+            del self._session_block_hash[session_id]
+
+        # 移除 session 注册信息
+        if session_id in self._sessions:
+            parent_session_id = self._sessions[session_id].parent_session_id
+            if parent_session_id and parent_session_id in self._sessions:
+                self._sessions[parent_session_id].children.discard(session_id)
+            del self._sessions[session_id]
 
         return block_hashes
 
@@ -1134,7 +1128,7 @@ class SessionController:
 
         # TODO: 获取当前session 基础hash总长度
         total_block_length = len(self._registry.get("get_block_hashes_by_session")(session_id, 0, -1))
-        logger.info(f"Process session {session_id} with lengh {total_block_length}")
+        logger.info(f"Process session {session_id} with block hash lengh {total_block_length}")
         op_result, fail_reason = self.process_edit_index(edit, total_block_length, session_id)
 
         if op_result:
@@ -1150,7 +1144,7 @@ class SessionController:
                 process_num = 0
                 for info in process_session_block_info:
                     process_num += len(info)
-                logger.info(f"session {session_id} session hash or block id count{process_num}")
+                logger.info(f"session {session_id} session hash or block id count {process_num}")
                 actual_process_blocks = fn(session_id, process_session_block_info, is_session_op)
 
         return EditResponse(
