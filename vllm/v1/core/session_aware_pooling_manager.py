@@ -78,9 +78,16 @@ class SessionKeyTracker:
         with self._lock:
             self._session_hashes[session_id] = block_hashes
             logger.info(f"SessionKeyTracker.add_hashes: session_id: {session_id}, block_hashes saved: {block_hashes}")
-            # for block_hash in block_hashes:
-            #     self._block_hashes.add(block_hash)
-            #     logger.debug(f"SessionKeyTracker.add_hashes: block_hash saved: {block_hash}")
+
+    def append_hashes(
+            self,
+            session_id: str,
+            block_hashes: list[BlockHash],
+    ) -> None:
+        with self._lock:
+            self._session_hashes.setdefault(session_id, []).extend(block_hashes)
+            logger.info(
+                f"SessionKeyTracker.append_hashes: session_id: {session_id}, block_hashes saved: {block_hashes}")
 
     def remove_hashes(
         self,
@@ -97,7 +104,7 @@ class SessionKeyTracker:
                 logger.warning(f"SessionKeyTracker.remove_hash: invalid block_hashes {block_hashes}")
                 return removed_nums
             list_hashes = self._session_hashes.get(session_id, [])
-            if not set(list_hashes).issubset(block_hashes):
+            if not set(block_hashes).issubset(set(list_hashes)):
                 logger.warning(f"SessionKeyTracker.remove_hash: invalid block_hashes {block_hashes} or invalid session_id: {session_id}")
                 return removed_nums
 
@@ -234,9 +241,13 @@ class SessionAwarePoolingManager(SessionEventListener):
         self,
         session_id,
         block_hashes: list[BlockHash],
+        overide_record: bool,
     ) -> None:
         """block 保护"""
-        self.key_tracker.add_hashes(session_id, block_hashes)
+        if overide_record:
+            self.key_tracker.add_hashes(session_id, block_hashes)
+        else:
+            self.key_tracker.append_hashes(session_id, block_hashes)
 
     def on_session_blocks_removed(
         self,
@@ -302,18 +313,6 @@ class SessionAwarePoolingManager(SessionEventListener):
     #         return False
 
     # --- 调度循环集成 ---
-    def on_check_matched_token(
-        self,
-        session_id: str,
-        check_matched_start: int,
-        check_matched_end: int,
-    ) -> int:
-        matched_token = 0
-        if check_matched_end < len(self.key_tracker.get_session_block_hashes(session_id)):
-            block_hashes = self.key_tracker.get_session_block_hashes(session_id)[check_matched_start:check_matched_end]
-            matched_token = self._lookup_remote_cache(block_hashes, len(block_hashes)*self.block_size)
-        return matched_token
-
     def _lookup_remote_cache(self, block_hashes: list[BlockHash], token_len: int) -> int:
         res = self.connector.connector_scheduler.client.lookup(
             token_len=token_len,

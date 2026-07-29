@@ -231,7 +231,7 @@ class SessionAwareManager:
                 )
 
         self._ttl_manager.register(block_infos=newly_protected_hashes, session_id=session_id,
-                                   expire_at=newly_protected_ttl, finished_registration=True)
+                                   expire_at=newly_protected_ttl, new_registration=False)
 
     def on_blocks_cache_hit(
         self,
@@ -601,7 +601,7 @@ class SessionAwareManager:
                 scale_factor = group_block_size // self.hash_block_size
                 group_block_start = block_start // scale_factor
                 group_block_end = (block_end + scale_factor - 1) // scale_factor
-                group_block_end = min(group_block_end, len(group_block_hash) - 1)
+                group_block_end = min(group_block_end, len(group_block_hash))
 
                 # 获取当前session的所有block的block_id
                 group_session_blocks_ids = [_ for _ in self._session_blocks[group_id][session_id]]
@@ -621,6 +621,8 @@ class SessionAwareManager:
         if session_id in self._session_block_hash:
             block_hash_len = len(self._session_block_hash[session_id])
             assert block_start >= 0 and block_end <= block_hash_len
+            if block_end == -1:
+                block_end = block_hash_len
             return self._session_block_hash[session_id][block_start:block_end]
         else:
             return []
@@ -825,13 +827,12 @@ class TTLManager:
         self._spm_notify_func = notify_func
         self._entries: dict[tuple[int, str], TTLBlockEntry] = {}
         self._timer_wheel = TTLTimerWheel(tick_count=3600)
-        self.waiting_block_hashes = set()
 
         logger.info("TTLManager initialized with on_expired=%s",
                     getattr(on_expired, "__name__", repr(on_expired)))
 
     def register(self, block_infos: list[tuple(int, list[BlockHash])], session_id: str, expire_at: float,
-                 finished_registration: bool = False) -> None:
+                 new_registration: bool = True) -> None:
         # TODO: 待处理接口
         """注册或更新一个 block 的 TTL。
 
@@ -841,9 +842,7 @@ class TTLManager:
           - 否则忽略（保留更晚的过期时间）。
         如果不存在：创建新的 TTLBlockEntry 并插入 timer wheel。
         """
-        if not finished_registration:
-            self.waiting_block_hashes = set()
-
+        waiting_block_hashes = set()
         logger.info(f"TTL Manager: working to register {len(block_infos)} blocks into timer wheel")
         for block_info in block_infos:
             key = (block_info[0], session_id)
@@ -866,12 +865,10 @@ class TTLManager:
                 self._timer_wheel.insert(entry, expire_at)
             logger.info(
                 f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
-            self.waiting_block_hashes.update(block_info[1])
+            waiting_block_hashes.update(block_info[1])
 
-        if finished_registration and len(self.waiting_block_hashes) > 0:
-            self._spm_notify_func("session_blocks_protected", session_id=session_id,
-                                  block_hashes=self.waiting_block_hashes)
-            self.waiting_block_hashes = set()
+        if len(waiting_block_hashes) > 0:
+            self._spm_notify_func("session_blocks_protected", session_id=session_id, block_hashes=waiting_block_hashes, overide_record=new_registration)
 
     def update(self, block_infos: list[tuple(int, list[BlockHash])], session_id: str,
                new_expire_at: float) -> None:
