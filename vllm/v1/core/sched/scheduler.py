@@ -410,7 +410,8 @@ class Scheduler(SchedulerInterface):
                 local_hit_block_hashes = []
                 for block_seq in local_blocks.blocks:
                     for block in block_seq:
-                        local_hit_block_hashes.append(get_block_hash(block.block_hash))
+                        if block.block_hash:
+                            local_hit_block_hashes.append(get_block_hash(block.block_hash))
                 # 剩余未被命中、待预取block hash
                 remain_block_hashes = [block_hash for block_hash in tmp_prefetch_req.block_hashes
                                        if block_hash not in local_hit_block_hashes]
