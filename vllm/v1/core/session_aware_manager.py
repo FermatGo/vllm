@@ -517,6 +517,7 @@ class SessionAwareManager:
             self,
             session_id: str,
             block_hashes: list[BlockHash],
+            is_session: bool = False
         ) -> int:
         """通知 SPM 创建远端预取任务。"""
         logger.info(f"block_hashes {block_hashes}")
