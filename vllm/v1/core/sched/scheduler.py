@@ -441,8 +441,8 @@ class Scheduler(SchedulerInterface):
                                       sampling_params = SamplingParams.from_optional(),
                                       pooling_params = None,
                                       is_prefetch_req = True)
-                    tmp_req.block_hashes = local_hit_block_hashes.extend(exist_external_block_hash)
-
+                    local_hit_block_hashes.extend(exist_external_block_hash)
+                    tmp_req.block_hashes = local_hit_block_hashes
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         tmp_req,
                         num_new_tokens=max(total_external_matched_tokens, 1),
