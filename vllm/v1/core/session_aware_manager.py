@@ -187,7 +187,9 @@ class SessionAwareManager:
                 # block._ttl_expire_at，但没有清理 SAM 双向索引和 TTLManager。
                 old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
                 for old_session_id in old_session_ids:
-                    self._ttl_manager.remove(block_id, old_session_id)
+                    record = self._block_sessions[group_id][block_id].get(session_id)
+                    if record and record.is_ephemeral:
+                        self._ttl_manager.remove(block_id, old_session_id)
 
                 # 统一清理 SAM 中这个物理 block 的所有旧 session 引用。
                 self._clear_block_session_refs(block_id, group_id)
