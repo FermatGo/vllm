@@ -134,6 +134,7 @@ class SingleTypeKVCacheManager(ABC):
 
         if request_id in self.num_cached_block:
             # Fast-path: a running request won't have any new prefix-cache hits.
+            print(f"==========self.num_cached_block {self.num_cached_block}")
             assert len(new_computed_blocks) == 0
             # NOTE: With speculative decoding, request's blocks may be allocated
             # for draft tokens which are later rejected. In this case,
@@ -457,6 +458,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
+        print(f"===============FullAttentionManager find_longest_cache_hit")
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
@@ -522,6 +524,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
+        print(f"===============SlidingWindowManager find_longest_cache_hit")
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
@@ -694,6 +697,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         Returns:
             A list of cached blocks
         """
+        print(f"===============ChunkedLocalAttentionManager find_longest_cache_hit")
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
             "ChunkedLocalAttentionManager can only be used for "
             "chunked local attention groups"
@@ -819,6 +823,7 @@ class MambaManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
+        print(f"===============MambaManager find_longest_cache_hit")
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
@@ -1103,6 +1108,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
+        print(f"===============MambaManager find_longest_cache_hit")
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
         )
