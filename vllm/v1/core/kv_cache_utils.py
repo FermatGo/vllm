@@ -326,7 +326,7 @@ class FreeKVCacheBlockQueue:
         # Remove the block from the linked list.
         first_block.prev_free_block = first_block.next_free_block = None
 
-        logger.info(
+        logger.debug(
             f"popleft: Popped block id {first_block.block_id} from free list."
             f"block._session_ref_cnt: {first_block._session_ref_cnt}. "
             f"block._ttl_expire_at: {first_block._ttl_expire_at}. "
