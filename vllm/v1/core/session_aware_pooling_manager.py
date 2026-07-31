@@ -77,7 +77,7 @@ class SessionKeyTracker:
     ) -> None:
         with self._lock:
             self._session_hashes[session_id] = block_hashes
-            logger.info(f"SessionKeyTracker.add_hashes: session_id: {session_id}, block_hashes saved: {block_hashes}")
+            logger.debug(f"SessionKeyTracker.add_hashes: session_id: {session_id}, block_hashes saved: {block_hashes}")
 
     def append_hashes(
             self,
@@ -86,7 +86,7 @@ class SessionKeyTracker:
     ) -> None:
         with self._lock:
             self._session_hashes.setdefault(session_id, []).extend(block_hashes)
-            logger.info(
+            logger.debug(
                 f"SessionKeyTracker.append_hashes: session_id: {session_id}, block_hashes saved: {block_hashes}")
 
     def remove_hashes(
@@ -110,14 +110,7 @@ class SessionKeyTracker:
 
             list_hashes = self._session_hashes.pop(session_id, [])
             removed_nums = len(list_hashes)
-            logger.info(f"SessionKeyTracker.remove_hash: session_id: {session_id}, block_hashes removed: {list_hashes}")
-            # for block_hash in block_hashes:
-            #     if block_hash not in self._block_hashes:
-            #         logger.info(f"SessionKeyTracker.remove_hash: block_hash not save: {block_hash}")
-            #     else:
-            #         removed_nums = removed_nums + 1
-            #         self._block_hashes.remove(block_hash)
-            #         logger.debug(f"SessionKeyTracker.remove_hashes: block_hash removed: {block_hash}")
+            logger.debug(f"SessionKeyTracker.remove_hash: session_id: {session_id}, block_hashes removed: {list_hashes}")
         return removed_nums
 
 
@@ -155,14 +148,7 @@ class KVCacheKeepAliveThread(threading.Thread):
                     token_len = self.block_size * nums
                     res = self.connector.look_up_keys(token_len, hashes)
                     hints_block_nums = hints_block_nums + res // self.block_size
-                logger.info(f"KVCacheKeepAliveThread: all blockes numbers: {all_block_nums}, hints block numbers: {hints_block_nums}")
-                # for i in range(0, len(hashes), self.max_keys):
-                #     batch = hashes[i:i+self.max_keys]
-                #     nums = len(batch)
-                #     token_len = self.block_size * nums
-                #     res = self.connector.look_up_keys(token_len, batch)
-                #     hints_block_nums = hints_block_nums + res // self.block_size
-                # logger.info(f"KVCacheKeepAliveThread: all block numbers: {len(hashes)} hints block numbers: {hints_block_nums}")
+                logger.debug(f"KVCacheKeepAliveThread: all blockes numbers: {all_block_nums}, hints block numbers: {hints_block_nums}")
             except Exception as e:
                 logger.error("Keep-alive thread error: %s", e)
 
@@ -257,66 +243,20 @@ class SessionAwarePoolingManager(SessionEventListener):
         """block 移除"""
         return self.key_tracker.remove_hashes(session_id, block_hashes)
 
-    # def on_session_cache_hit(
-    #     self,
-    #     block_hashes: list[BlockHash],
-    # ) -> None:
-    #     """prefix cache 命中时记录 PoolKey（幂等）"""
-    #     self.on_session_blocks_protected(block_hashes)
-
-    # def on_session_ttl_expired(self, block_hashs: list[BlockHash]) -> None:
-    #     """TTL 到期时检查远端 KV cache 是否需驱逐"""
-    #     return
-
     def on_session_freed(self, session_id: str) -> None:
         """Session 被清理时移除所有 PoolKey 关联并标记驱逐"""
         return
 
-    # def on_context_management_evict(
-    #     self,
-    #     block_hashes: list[BlockHash],
-    # ) -> None:
-    #     """evict 操作时移除部分 PoolKey 关联"""
-    #     return
-
     def on_context_management_offload(self, session_id: str, block_ids: list[int]) -> None:
         """offload 操作时仅移除本地 block 引用，远端 KV cache 保留"""
         return
-
-    # def on_context_management_prefetch(
-    #     self,
-    #     session_id: str,
-    #     block_hashes: list[BlockHash],
-    # ) -> bool:
-    #     """prefetch 操作时创建预取请求"""
-    #     if not self.config.enable_prefetch:
-    #         return
-    #     token_len = len(block_hashes) * self.block_size
-    #     logger.info(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
-    #                 f"token_len {token_len}")
-    #     request = PrefetchRequest(
-    #         session_id=session_id,
-    #         request_id=f"__prefetch_{session_id}_{time.monotonic():.0f}",
-    #         block_hashes=block_hashes,
-    #         token_len=token_len,
-    #         priority=0,
-    #         created_at=time.monotonic(),
-    #         dest_block_ids=None,
-    #     )
-    #     if len(self.prefetch_waiting_queue) < self.config.prefetch_max_queue_size:
-    #         self.prefetch_waiting_queue.append(request)
-    #         logger.info(f"SessionAwarePoolingManager on_context_management_prefetch: prefetch_waiting_queue added PrefetchRequest: {PrefetchRequest}")
-    #         return True
-    #     else:
-    #         logger.warning(f"prefetch queue is reaching the max queue size {self.config.prefetch_max_queue_size} "
-    #                        f"and failed to add to the queue")
-    #         return False
 
     # --- 调度循环集成 ---
     def _lookup_remote_cache(self, block_hashes: list[BlockHash], token_len: int) -> int:
         res = self.connector.connector_scheduler.client.lookup(
             token_len=token_len,
             block_hashes=block_hashes,
+            kv_cache_group_ids=self.connector.connector_scheduler.kv_cache_group_ids
         )
         return res
 
@@ -438,8 +378,11 @@ class SessionAwarePoolingManager(SessionEventListener):
             logger.warning("block_hashes can not be None")
             return True
         token_len = len(block_hashes) * self.block_size
-        logger.info(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
+        logger.debug(f"calling cb func on_context_management_prefetch with session {session_id} block_hashes {block_hashes} "
                     f"token_len {token_len}")
+        logger.debug(f"SessionAwarePoolingManager.on_context_management_prefetch: token_len: {token_len}")
+        logger.debug(f"SessionAwarePoolingManager.on_context_management_prefetch: block_hashes: {block_hashes}")
+        logger.debug(f"SessionAwarePoolingManager.on_context_management_prefetch: block_hashes_len: {len(block_hashes)}")
         request = PrefetchRequest(
             session_id=session_id,
             request_id=f"__prefetch_{session_id}_{time.monotonic():.0f}",
@@ -451,7 +394,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         )
         if len(self.prefetch_waiting_queue) < self.config.prefetch_max_queue_size:
             self.prefetch_waiting_queue.append(request)
-            logger.info(f"SessionAwarePoolingManager on_context_management_prefetch: prefetch_waiting_queue added PrefetchRequest: {PrefetchRequest}")
+            logger.debug(f"SessionAwarePoolingManager.on_context_management_prefetch: prefetch_waiting_queue added PrefetchRequest: {PrefetchRequest}")
             return True
         else:
             logger.warning(f"prefetch queue is reaching the max queue size {self.config.prefetch_max_queue_size} "

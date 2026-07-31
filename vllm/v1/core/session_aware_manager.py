@@ -522,7 +522,7 @@ class SessionAwareManager:
             is_session: bool = False
         ) -> int:
         """通知 SPM 创建远端预取任务。"""
-        logger.info(f"block_hashes {block_hashes}")
+        # logger.info(f"block_hashes {block_hashes}")
         self._notify_event(
             "context_management_prefetch",
             session_id=session_id,
@@ -845,7 +845,7 @@ class TTLManager:
           - 否则忽略（保留更晚的过期时间）。
         如果不存在：创建新的 TTLBlockEntry 并插入 timer wheel。
         """
-        waiting_block_hashes = set()
+        waiting_block_hashes = []
         logger.info(f"TTL Manager: working to register {len(block_infos)} blocks into timer wheel")
         for block_info in block_infos:
             key = (block_info[0], session_id)
@@ -868,7 +868,7 @@ class TTLManager:
                 self._timer_wheel.insert(entry, expire_at)
             logger.info(
                 f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
-            waiting_block_hashes.update(block_info[1])
+            waiting_block_hashes.extend(block_info[1])
 
         if len(waiting_block_hashes) > 0:
             self._spm_notify_func("session_blocks_protected", session_id=session_id, block_hashes=waiting_block_hashes, overide_record=new_registration)
@@ -1162,9 +1162,9 @@ class SessionController:
 
         if edit.block_end is None:
             edit.block_end = candidate_list_length
-
-        # 左闭右闭
-        edit.block_end += 1
+        else:
+            # 左闭右闭
+            edit.block_end += 1
 
         if candidate_list_length == 0:
             edit.block_start = edit.block_end = 0
