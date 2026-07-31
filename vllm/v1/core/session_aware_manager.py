@@ -580,45 +580,111 @@ class SessionAwareManager:
         res = len(affected_block_hashes)
         return res
 
-    def _get_session_global_block_ids(self, session_id: str, block_start: int, block_end: int) -> tuple[list[int], ...]:
-        num_kv_cache_groups = self.num_kv_cache_groups
+    def _get_session_global_block_ids(
+        self,
+        session_id: str,
+        block_start: int,
+        block_end: int,
+    ) -> tuple[list[int], ...]:
+        """将基础 hash block 范围映射为各 KV cache group 的物理 block id。
 
-        block_ids_result = tuple([] for _ in range(num_kv_cache_groups))
+        当某个 KV cache group 的 block size 大于 hash_block_size 时，只要
+        物理 block 与指定逻辑范围有重叠，就返回该物理 block。
+        """
+        result: tuple[list[int], ...] = tuple(
+            [] for _ in range(self.num_kv_cache_groups)
+        )
 
-        for group_id in range(num_kv_cache_groups):
+        base_block_hashes = self._session_block_hash.get(session_id)
+        if not base_block_hashes:
+            logger.warning(
+                f'There is no hash for the session_id:{session_id} '
+                f'in the _session_block_hash.')
+            return result
 
-            if session_id in self._session_blocks[group_id]:
+        base_block_count = len(base_block_hashes)
 
-                group_block_size = self.block_size[group_id]
-                group_block_hash = self._session_block_hash.get(session_id, [])
+        if block_end == -1:
+            block_end = base_block_count
 
-                # 将_session_block_hash转换成对应block size的BlockHash
-                if group_block_size != self.hash_block_size:
-                    assert group_block_size % self.hash_block_size == 0, (
-                    f"block_size {group_block_size} is not a multiple of {self.hash_block_size}")
-                    group_block_hash = BlockHashListWithBlockSize(
-                        group_block_hash, self.hash_block_size, group_block_size
+        # 防止负数下标被 Python 当成从末尾索引。
+        if block_start < 0 or block_end < 0:
+            logger.warning(
+                "Invalid block range for session %s: [%s, %s)",
+                session_id, block_start, block_end,
+            )
+            return result
+
+        block_end = min(block_end, base_block_count)
+
+        if block_start >= block_end:
+            return result
+
+        for group_id in range(self.num_kv_cache_groups):
+
+            # 获取该 session_id 第 group_id 的 block_ids(即blocks)
+            session_blocks = self._session_blocks[group_id].get(session_id)
+            # 该group的block_size可能比较大，还没满，继续下一个group
+            if not session_blocks:
+                continue
+
+            group_block_size = self.block_size[group_id]
+            assert group_block_size % self.hash_block_size == 0, (
+                f"block_size {group_block_size} is not a multiple of "
+                f"{self.hash_block_size}"
+            )
+
+            # 将基础 block hash 转换成对应block size的BlockHash
+            scale_factor = group_block_size // self.hash_block_size
+            if scale_factor == 1:
+                group_block_hashes = base_block_hashes
+            else:
+                group_block_hashes = BlockHashListWithBlockSize(
+                    base_block_hashes, self.hash_block_size, group_block_size,
+                )
+
+            # 逻辑范围 [block_start, block_end) 与物理 block 有重叠即选中。
+            group_block_start = block_start // scale_factor
+            group_block_end = (block_end + scale_factor - 1) // scale_factor
+            group_block_end = min(group_block_end, len(group_block_hashes))
+
+            if group_block_start >= group_block_end:
+                continue
+
+            # 每个 group 建立 [hash: block_id] 映射
+            hash_block: dict[BlockHash, int] = {}
+
+            for block_id in session_blocks:
+                block = self.kv_cache_manager.block_pool.blocks[block_id]
+                block_hash_with_group_id = block.block_hash
+
+                # 未填满或尚未进入 prefix cache 的 block 可能没有 hash。
+                if block_hash_with_group_id is None:
+                    logger.debug(
+                        "Skip unhashed block %s for session %s, group %s",
+                        block_id, session_id, group_id,
                     )
-                
-                # 将在基础 BlockHash List中的index转换为对应 block size的BlockHash List的index
-                scale_factor = group_block_size // self.hash_block_size
-                group_block_start = block_start // scale_factor
-                group_block_end = (block_end + scale_factor - 1) // scale_factor
-                group_block_end = min(group_block_end, len(group_block_hash))
+                    continue
 
-                # 获取当前session的所有block的block_id
-                group_session_blocks_ids = [_ for _ in self._session_blocks[group_id][session_id]]
-                # 获取当前session的所有block的block_hash, 通过前面获取的block_id获取
-                group_session_blocks_hashes = [get_block_hash(self.kv_cache_manager.block_pool.blocks[_].block_hash) for
-                                               _ in group_session_blocks_ids]
+                physical_hash = get_block_hash(block_hash_with_group_id)
 
-                # group_block_start 到 group_block_end 的转换后的
-                for ind in range(group_block_start, group_block_end):
-                    if group_block_hash[ind] in group_session_blocks_hashes:
-                        hash_ind = group_session_blocks_hashes.index(group_block_hash[ind])
-                        block_ids_result[group_id].append(group_session_blocks_ids[hash_ind])
+                # 理论上同一 group 的相同完整 hash 应映射到同一缓存内容。
+                # 保留第一次记录，避免覆盖造成结果不稳定。
+                hash_block.setdefault(physical_hash, block_id)
 
-        return block_ids_result
+            for group_index in range(group_block_start, group_block_end):
+                target_hash = group_block_hashes[group_index]
+                block_id = hash_block.get(target_hash)
+
+                if block_id is None:
+                    logger.warning(
+                        f'block not found, target block hash:{target_hash}, '
+                        f'block index:{group_index*scale_factor}')
+                    continue
+
+                result[group_id].append(block_id)
+
+        return result
 
     def _get_session_block_hash(self, session_id: str, block_start: int, block_end: int) -> list[BlockHash]:
         if session_id in self._session_block_hash:
