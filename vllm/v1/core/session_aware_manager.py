@@ -846,7 +846,7 @@ class TTLManager:
         如果不存在：创建新的 TTLBlockEntry 并插入 timer wheel。
         """
         waiting_block_hashes = []
-        logger.info(f"TTL Manager: working to register {len(block_infos)} blocks into timer wheel")
+        logger.debug(f"TTL Manager: working to register {len(block_infos)} blocks into timer wheel")
         for block_info in block_infos:
             key = (block_info[0], session_id)
             if key in self._entries:

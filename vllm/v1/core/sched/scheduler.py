@@ -924,7 +924,7 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
-                logger.info(
+                logger.debug(
                     f"Prefill block allocated: req id={request.request_id} block ids={new_blocks.get_block_ids()}")
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
