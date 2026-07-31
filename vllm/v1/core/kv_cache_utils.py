@@ -283,7 +283,7 @@ class FreeKVCacheBlockQueue:
                     curr_block._ttl_expire_at = 0.0
                     if curr_block.num_session_refs > 0:
                         self.promote_to_zone_b(curr_block)
-                        logger.info(
+                        logger.debug(
                             f"popleft: Promoted expired C-zone block id {curr_block.block_id} "
                             f"to zone B."
                             f"block._session_ref_cnt: {curr_block._session_ref_cnt}. "
@@ -291,7 +291,7 @@ class FreeKVCacheBlockQueue:
                         )
                     else:
                         self.promote_to_zone_a(curr_block)
-                        logger.info(
+                        logger.debug(
                             f"popleft: Promoted expired C-zone block id {curr_block.block_id} "
                             f"to zone A."
                             f"block._session_ref_cnt: {curr_block._session_ref_cnt}. "
@@ -392,7 +392,7 @@ class FreeKVCacheBlockQueue:
         block.prev_free_block = block.next_free_block = None
         self.num_free_blocks -= 1
 
-        logger.info(
+        logger.debug(
             f"remove: Removing block id {block.block_id} from free list. "
             f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
@@ -411,18 +411,18 @@ class FreeKVCacheBlockQueue:
             )
         
         if block.is_ephemeral:
-            logger.info(f"append: Appending TTL-protected block id {block.block_id} to free list.")
+            logger.debug(f"append: Appending TTL-protected block id {block.block_id} to free list.")
             # C zone: append before fake tail, same as original append.
             prev_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
 
         elif block.num_session_refs > 0:
-            logger.info(f"append: Appending block id {block.block_id} to zone B.")
+            logger.debug(f"append: Appending block id {block.block_id} to zone B.")
             # B zone: insert after B tail, otherwise after A tail/head.
             prev_block = self.zone2_end or self.zone1_end or self.fake_free_list_head
             self.zone2_end = block
 
         else:
-            logger.info(f"append: Appending block id {block.block_id} to zone A.")
+            logger.debug(f"append: Appending block id {block.block_id} to zone A.")
             # A zone: insert after A tail, otherwise after head.
             prev_block = self.zone1_end or self.fake_free_list_head
             self.zone1_end = block
@@ -440,7 +440,7 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += 1
 
-        logger.info(
+        logger.debug(
             f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
         )
@@ -518,7 +518,7 @@ class FreeKVCacheBlockQueue:
         next_block.prev_free_block = block
         self.zone1_end = block
 
-        logger.info(
+        logger.debug(
             f"promote_to_zone_a: Promoting block id {block.block_id} to zone A."
             f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
@@ -555,7 +555,7 @@ class FreeKVCacheBlockQueue:
         next_block.prev_free_block = block
         self.zone2_end = block
 
-        logger.info(
+        logger.debug(
             f"promote_to_zone_b: Promoting block id {block.block_id} to zone B."
             f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
