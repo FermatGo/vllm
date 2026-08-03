@@ -232,8 +232,9 @@ class SessionAwareManager:
                     ttl_expire_at=ttl_expire_at,
                 )
 
+        max_block_size = max(self.block_size)
         session_block_hash = self._session_block_hash.get(session_id)
-        block_end = ephemeral_range.block_offset+1
+        block_end = (ephemeral_range.block_offset + max_block_size) // max_block_size * max_block_size  
         if ephemeral_range.block_offset+1 > len(session_block_hash):
             logger.warning(f'ephemeral range exceed session block hash. session id:{session_id}')
             block_end = len(session_block_hash)
@@ -344,8 +345,9 @@ class SessionAwareManager:
                         ttl_expire_at=block_expire_at,
                     )
 
+        max_block_size = max(self.block_size)
         session_block_hash = self._session_block_hash.get(session_id)
-        block_end = ephemeral_range.block_offset+1
+        block_end = (ephemeral_range.block_offset + max_block_size) // max_block_size * max_block_size  
         if ephemeral_range.block_offset+1 > len(session_block_hash):
             logger.warning(f'ephemeral range exceed session block hash. session id:{session_id}')
             block_end = len(session_block_hash)
