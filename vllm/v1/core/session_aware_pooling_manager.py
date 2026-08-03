@@ -227,13 +227,9 @@ class SessionAwarePoolingManager(SessionEventListener):
         self,
         session_id,
         block_hashes: list[BlockHash],
-        overide_record: bool,
     ) -> None:
         """block 保护"""
-        if overide_record:
-            self.key_tracker.add_hashes(session_id, block_hashes)
-        else:
-            self.key_tracker.append_hashes(session_id, block_hashes)
+        self.key_tracker.add_hashes(session_id, block_hashes)
 
     def on_session_blocks_removed(
         self,
