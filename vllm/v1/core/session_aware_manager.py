@@ -167,7 +167,7 @@ class SessionAwareManager:
         self._ensure_session_registered(session_id, parent_session_id)
 
         now = time.monotonic()
-        newly_protected_hashes: list[tuple(int, list[BlockHash])] = []
+        newly_protected_hashes: list[list[tuple(int, list[BlockHash])]] = [[] for _ in range(self.num_kv_cache_groups)]
         newly_protected_ttl: float = 0.0
 
         for group_id, block_ids in enumerate(blocks.get_block_ids()):
@@ -219,7 +219,7 @@ class SessionAwareManager:
                 self._add_session_block_ref(record, group_id)
 
                 if is_ephemeral:
-                    newly_protected_hashes.append(
+                    newly_protected_hashes[group_id].append(
                         (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                     newly_protected_ttl = ttl_expire_at
 
@@ -248,7 +248,7 @@ class SessionAwareManager:
 
         # 最新request的ttl时间
         now = time.monotonic()
-        newly_protected_hashes: list[tuple(int, list[BlockHash])] = []
+        newly_protected_hashes: list[list[tuple(int, list[BlockHash])]] = [[] for _ in range(self.num_kv_cache_groups)]
         newly_protected_ttl: float = 0.0
 
         for group_id, block_ids in enumerate(blocks.get_block_ids()):
@@ -291,7 +291,7 @@ class SessionAwareManager:
                         self._add_session_block_ref(record, group_id)
 
                         # self._ttl_manager.update(block_id, session_id, new_expire_at)
-                        newly_protected_hashes.append(
+                        newly_protected_hashes[group_id].append(
                             (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                         newly_protected_ttl = new_expire_at
 
@@ -317,7 +317,7 @@ class SessionAwareManager:
                     self._add_session_block_ref(record, group_id)
 
                     if is_ephemeral:
-                        newly_protected_hashes.append(
+                        newly_protected_hashes[group_id].append(
                             (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                         newly_protected_ttl = requested_expire_at
 
