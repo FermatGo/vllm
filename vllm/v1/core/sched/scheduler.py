@@ -454,7 +454,7 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks=local_blocks
                     )
                     if new_blocks:
-                        tmp_prefetch_req.dest_block_ids =self.kv_cache_manager.get_blocks(tmp_prefetch_req.request_id).get_block_ids()
+                        tmp_prefetch_req.dest_block_ids = self.kv_cache_manager.get_blocks(tmp_prefetch_req.request_id).get_block_ids()
                         tmp_prefetch_req.token_len = len(total_hit_block_hashes) * hash_block_size
                         tmp_prefetch_req.vllm_cache_tokens = local_computed_tokens
                     else:

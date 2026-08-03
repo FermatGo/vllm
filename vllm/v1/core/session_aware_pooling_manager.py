@@ -279,46 +279,6 @@ class SessionAwarePoolingManager(SessionEventListener):
             prefetch_req, matched_tokens
         )
 
-    def process_prefetch_queue(self) -> list[PrefetchRequest]:
-        """在 Scheduler 调度循环中处理预取请求"""
-
-        if not self.prefetch_waiting_queue:
-            return []
-
-        # 按 priority 排序（0=最高优先）
-        # self.prefetch_waiting_queue.sort(key=lambda r: r.priority)
-
-        completed = []
-        remaining = []
-
-        for prefetch_req in self.prefetch_waiting_queue:
-            # 1. 检查预取请求是否仍然有效
-            if prefetch_req.session_id not in self.sam._sessions:
-                continue  # session 已不存在，跳过
-
-            try:
-                matched_tokens = self._lookup_remote_cache(
-                    block_hashes=prefetch_req.block_hashes,
-                    token_len=prefetch_req.token_len,
-                )
-                logger.info(f"lookup_remote_cache: prefetch_req with session_id {prefetch_req.session_id} "
-                            f"gets matched_tokens {matched_tokens}")
-
-                if matched_tokens > 0:
-                    # 4. 创建预取请求到 Scheduler
-                    # Scheduler 在下次调度时分配 block 并触发 load
-                    self._submit_prefetch_to_scheduler(
-                        prefetch_req, matched_tokens
-                    )
-                completed.append(prefetch_req)
-            except Exception as e:
-                logger.error("Prefetch failed for session %s: %s",
-                            prefetch_req.session_id, e)
-                remaining.append(prefetch_req)
-
-        self.prefetch_waiting_queue = remaining
-        return completed
-
     def process_eviction_marks(self, now: float | None = None) -> None:
         """处理驱逐标记 — 停止 Keep-Alive 保护"""
         return
