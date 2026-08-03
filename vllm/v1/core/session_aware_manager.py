@@ -167,7 +167,7 @@ class SessionAwareManager:
         self._ensure_session_registered(session_id, parent_session_id)
 
         now = time.monotonic()
-        newly_protected_hashes: list[list[tuple(int, list[BlockHash])]] = [[] for _ in range(self.num_kv_cache_groups)]
+        newly_protected_hashes: list[tuple(int, list[BlockHash])] = []
         newly_protected_ttl: float = 0.0
 
         for group_id, block_ids in enumerate(blocks.get_block_ids()):
@@ -219,7 +219,7 @@ class SessionAwareManager:
                 self._add_session_block_ref(record, group_id)
 
                 if is_ephemeral:
-                    newly_protected_hashes[group_id].append(
+                    newly_protected_hashes.append(
                         (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                     newly_protected_ttl = ttl_expire_at
 
@@ -232,8 +232,17 @@ class SessionAwareManager:
                     ttl_expire_at=ttl_expire_at,
                 )
 
+        session_block_hash = self._session_block_hash.get(session_id)
+        block_end = ephemeral_range.block_offset+1
+        if ephemeral_range.block_offset+1 > len(session_block_hash):
+            logger.warning(f'ephemeral range exceed session block hash. session id:{session_id}')
+            block_end = len(session_block_hash)
+            
+        if newly_protected_hashes and session_block_hash:
+            protected_block_hashes = session_block_hash[0:block_end]
+        
         self._ttl_manager.register(block_infos=newly_protected_hashes, session_id=session_id,
-                                   expire_at=newly_protected_ttl, new_registration=False)
+                                   expire_at=newly_protected_ttl, protected_block_hashes=protected_block_hashes)
 
     def on_blocks_cache_hit(
         self,
@@ -335,7 +344,16 @@ class SessionAwareManager:
                         ttl_expire_at=block_expire_at,
                     )
 
-        self._ttl_manager.register(newly_protected_hashes, session_id, newly_protected_ttl)
+        session_block_hash = self._session_block_hash.get(session_id)
+        block_end = ephemeral_range.block_offset+1
+        if ephemeral_range.block_offset+1 > len(session_block_hash):
+            logger.warning(f'ephemeral range exceed session block hash. session id:{session_id}')
+            block_end = len(session_block_hash)
+            
+        if newly_protected_hashes and session_block_hash:
+            protected_block_hashes = session_block_hash[0:block_end]
+
+        self._ttl_manager.register(newly_protected_hashes, session_id, newly_protected_ttl, protected_block_hashes=protected_block_hashes)
 
     def _on_ttl_expired(self, block_id: int, session_id: str) -> None:
         """ephemeral block TTL 到期回调"""
