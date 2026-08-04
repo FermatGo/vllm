@@ -300,8 +300,9 @@ class FreeKVCacheBlockQueue:
 
                 curr_block = next_block
 
-        if self.zone1_end is None and self.zone2_end is None:
-            raise ValueError("No allocatable free blocks available")
+        # 开放C区
+        # if self.zone1_end is None and self.zone2_end is None:
+        #     raise ValueError("No allocatable free blocks available")
 
         first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
 
@@ -402,33 +403,81 @@ class FreeKVCacheBlockQueue:
         """Put a block back into the free list and increase
         num_free_blocks by 1.
 
-        Args:
-            block: The block to append.
+        Zone A:
+            Blocks without session references.
+
+        Zone B:
+            Blocks with session references, ordered by num_session_refs ascending.
+
+        Zone C:
+            TTL-protected blocks, ordered by _ttl_expire_at ascending.
         """
         if self.fake_free_list_tail.prev_free_block is None:
             raise RuntimeError(
                 "prev_free_block of fake_free_list_tail should always exist"
             )
-        
+
         if block.is_ephemeral:
-            logger.debug(f"append: Appending TTL-protected block id {block.block_id} to free list.")
-            # C zone: append before fake tail, same as original append.
-            prev_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
+            logger.debug(
+                "append: Appending TTL-protected block id %s to zone C.",
+                block.block_id,
+            )
+
+            # C 区位于 A/B 区之后, 按 _ttl_expire_at 升序排列: 小的靠前, 大的靠后
+            prev_block = (
+                self.zone2_end or self.zone1_end or self.fake_free_list_head
+            )
+            curr_block = prev_block.next_free_block
+
+            while curr_block is not self.fake_free_list_tail:
+                if curr_block is None:
+                    raise RuntimeError("Invalid zone C boundary")
+
+                # 插入到第一个过期时间更大的 block 前面。
+                # 使用 >，使相同 TTL 的 block 保持 FIFO 顺序。
+                if curr_block._ttl_expire_at > block._ttl_expire_at:
+                    break
+
+                prev_block = curr_block
+                curr_block = curr_block.next_free_block
 
         elif block.num_session_refs > 0:
-            logger.debug(f"append: Appending block id {block.block_id} to zone B.")
-            # B zone: insert after B tail, otherwise after A tail/head.
-            prev_block = self.zone2_end or self.zone1_end or self.fake_free_list_head
-            self.zone2_end = block
+            logger.debug("append: Appending block id %s to zone B.", block.block_id)
+
+            # B 区按照 session 引用数量升序排列, 引用少的靠前，引用多的靠后
+            prev_block = self.zone1_end or self.fake_free_list_head
+
+            if self.zone2_end is not None:
+                while prev_block is not self.zone2_end:
+                    curr_block = prev_block.next_free_block
+
+                    if (
+                        curr_block is None
+                        or curr_block is self.fake_free_list_tail
+                    ):
+                        raise RuntimeError("Invalid zone B boundary")
+
+                    if curr_block.num_session_refs > block.num_session_refs:
+                        break
+
+                    prev_block = curr_block
+
+            # 只有插入到 B 区末尾时才更新 zone2_end。
+            if self.zone2_end is None or prev_block is self.zone2_end:
+                self.zone2_end = block
 
         else:
-            logger.debug(f"append: Appending block id {block.block_id} to zone A.")
-            # A zone: insert after A tail, otherwise after head.
+            logger.debug("append: Appending block id %s to zone A.", block.block_id)
+
+            # A 区保持 FIFO 顺序。
             prev_block = self.zone1_end or self.fake_free_list_head
             self.zone1_end = block
 
         next_block = prev_block.next_free_block
-        assert next_block is not None
+        if next_block is None:
+            raise RuntimeError(
+                f"Invalid insertion position for block {block.block_id}"
+            )
 
         # Connect the new block after prev_block.
         prev_block.next_free_block = block
@@ -441,6 +490,7 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks += 1
 
         logger.debug(
+            f"append: block id {block.block_id} inserted; "
             f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
         )
@@ -523,37 +573,74 @@ class FreeKVCacheBlockQueue:
             f"block._session_ref_cnt: {block._session_ref_cnt}. "
             f"block._ttl_expire_at: {block._ttl_expire_at}. "
         )
-    
+
     def promote_to_zone_b(self, block: KVCacheBlock) -> None:
-        """Move an existing free block to the tail of zone B."""
+        """Move an existing free block into zone B.
+
+        Zone B is ordered by session reference count in ascending order.
+        """
         if block.prev_free_block is None or block.next_free_block is None:
-            raise RuntimeError(f"promote_to_zone_b() called on invalid block: {block}")
-
-        if block is self.zone2_end:
-            return
-
-        # Remove without changing num_free_blocks.
-        prev_block = block.prev_free_block
-        next_block = block.next_free_block
-
-        if block is self.zone1_end:
-            self.zone1_end = (
-                prev_block if prev_block is not self.fake_free_list_head else None
+            raise RuntimeError(
+                f"promote_to_zone_b() called on invalid block: {block}"
             )
 
-        prev_block.next_free_block = next_block
-        next_block.prev_free_block = prev_block
+        # Remove without changing num_free_blocks.
+        old_prev = block.prev_free_block
+        old_next = block.next_free_block
 
-        # Insert into B tail.
-        prev_block = self.zone2_end or self.zone1_end or self.fake_free_list_head
+        # block 原来是 A 区最后一个节点。
+        if block is self.zone1_end:
+            self.zone1_end = (
+                old_prev if old_prev is not self.fake_free_list_head else None
+            )
+
+        # block 原来是 B 区最后一个节点。
+        if block is self.zone2_end:
+            self.zone2_end = (
+                old_prev
+                if (
+                    old_prev is not self.fake_free_list_head
+                    and old_prev is not self.zone1_end
+                )
+                else None
+            )
+
+        old_prev.next_free_block = old_next
+        old_next.prev_free_block = old_prev
+
+        # 在 B 区内按照 session 引用数量升序寻找插入位置。
+        prev_block = self.zone1_end or self.fake_free_list_head
+
+        if self.zone2_end is not None:
+            while prev_block is not self.zone2_end:
+                curr_block = prev_block.next_free_block
+
+                if (
+                    curr_block is None
+                    or curr_block is self.fake_free_list_tail
+                ):
+                    raise RuntimeError("Invalid zone B boundary")
+
+                if curr_block.num_session_refs > block.num_session_refs:
+                    break
+
+                prev_block = curr_block
+
         next_block = prev_block.next_free_block
-        assert next_block is not None
+        if next_block is None:
+            raise RuntimeError(
+                f"Invalid zone B insertion position for block {block.block_id}"
+            )
 
         prev_block.next_free_block = block
         block.prev_free_block = prev_block
+
         block.next_free_block = next_block
         next_block.prev_free_block = block
-        self.zone2_end = block
+
+        # B 区为空，或者插入在原 B 区末尾时，更新尾节点。
+        if self.zone2_end is None or prev_block is self.zone2_end:
+            self.zone2_end = block
 
         logger.debug(
             f"promote_to_zone_b: Promoting block id {block.block_id} to zone B."
@@ -562,34 +649,80 @@ class FreeKVCacheBlockQueue:
         )
     
     def promote_to_zone_c(self, block: KVCacheBlock) -> None:
-        """Move an existing free block to the tail of zone B."""
+        """Move an existing free block into zone C.
+
+        Zone C is ordered by _ttl_expire_at ascending, so blocks
+        with a larger TTL are placed closer to the end.
+        """
         if block.prev_free_block is None or block.next_free_block is None:
-            raise RuntimeError(f"promote_to_zone_c() called on invalid block: {block}")
+            raise RuntimeError(
+                f"promote_to_zone_c() called on invalid block: {block}"
+            )
 
-        prev_block = block.prev_free_block
-        next_block = block.next_free_block
+        # 先从原位置摘除，但不修改 num_free_blocks。
+        old_prev = block.prev_free_block
+        old_next = block.next_free_block
 
+        # block 原来是 A 区最后一个节点。
         if block is self.zone1_end:
-            self.zone1_end = prev_block if prev_block is not self.fake_free_list_head else None
+            self.zone1_end = (
+                old_prev if old_prev is not self.fake_free_list_head else None
+            )
+
+        # block 原来是 B 区最后一个节点。
         if block is self.zone2_end:
             self.zone2_end = (
-                prev_block
-                if prev_block is not self.fake_free_list_head
-                and prev_block is not self.zone1_end
+                old_prev
+                if (
+                    old_prev is not self.fake_free_list_head
+                    and old_prev is not self.zone1_end
+                )
                 else None
             )
 
-        prev_block.next_free_block = next_block
-        next_block.prev_free_block = prev_block
+        old_prev.next_free_block = old_next
+        old_next.prev_free_block = old_prev
 
-        prev_block = self.fake_free_list_tail.prev_free_block
-        assert prev_block is not None
-        next_block = self.fake_free_list_tail
+        block.prev_free_block = None
+        block.next_free_block = None
+
+        # C 区从 A/B 区之后开始，一直到 fake tail。
+        prev_block = (
+            self.zone2_end
+            or self.zone1_end
+            or self.fake_free_list_head
+        )
+        curr_block = prev_block.next_free_block
+
+        # 按 _ttl_expire_at 升序寻找插入位置。
+        while curr_block is not self.fake_free_list_tail:
+            if curr_block is None:
+                raise RuntimeError("Invalid zone C boundary")
+
+            # 插入到第一个过期时间更大的 block 前面, 相同过期时间保持 FIFO 顺序
+            if curr_block._ttl_expire_at > block._ttl_expire_at:
+                break
+
+            prev_block = curr_block
+            curr_block = curr_block.next_free_block
+
+        next_block = prev_block.next_free_block
+        if next_block is None:
+            raise RuntimeError(
+                f"Invalid zone C insertion position for block {block.block_id}"
+            )
 
         prev_block.next_free_block = block
         block.prev_free_block = prev_block
+
         block.next_free_block = next_block
         next_block.prev_free_block = block
+
+        logger.debug(
+            f"promote_to_zone_b: Promoting block id {block.block_id} to zone C."
+            f"block._session_ref_cnt: {block._session_ref_cnt}. "
+            f"block._ttl_expire_at: {block._ttl_expire_at}. "
+        )
     
     def on_block_meta_changed(self, block: KVCacheBlock) -> None:
         """block metadata（_session_ref_cnt 或 _ttl_expire_at）变化后重新评估分区"""
