@@ -727,7 +727,7 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-
+                self.session_aware_manager._session_block_hash[request.session_id] = request.block_hashes
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status

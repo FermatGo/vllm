@@ -916,13 +916,12 @@ class TTLManager:
         self._spm_notify_func = notify_func
         self._entries: dict[tuple[int, str], TTLBlockEntry] = {}
         self._timer_wheel = TTLTimerWheel(tick_count=3600)
-        self._last_prefix_hashes_by_group = None
 
         logger.info("TTLManager initialized with on_expired=%s",
                     getattr(on_expired, "__name__", repr(on_expired)))
 
-    def register(self, block_infos_by_group: list[list[tuple(int, list[BlockHash])]], session_id: str, expire_at: float,
-                 new_registration: bool = True) -> None:
+    def register(self, block_infos: list[tuple(int, list[BlockHash])], session_id: str, expire_at: float,
+                 protected_block_hashes: list[BlockHash] = None) -> None:
         # TODO: 待处理接口
         """注册或更新一个 block 的 TTL。
 
@@ -932,41 +931,33 @@ class TTLManager:
           - 否则忽略（保留更晚的过期时间）。
         如果不存在：创建新的 TTLBlockEntry 并插入 timer wheel。
         """
-        if new_registration or not self._last_prefix_hashes_by_group:
-            self._last_prefix_hashes_by_group = [[] for _ in range(len(block_infos_by_group))]
+        logger.debug(f"TTL Manager: working to register {len(block_infos)} blocks into timer wheel")
+        for block_info in block_infos:
+            key = (block_info[0], session_id)
+            if key in self._entries:
+                old_entry = self._entries[key]
+                if expire_at > old_entry.ttl_expire_at:
+                    self._timer_wheel.remove(old_entry)
+                    old_entry.ttl_expire_at = expire_at
+                    old_entry.block_hashes = block_info[1]
+                    self._timer_wheel.insert(old_entry, expire_at)
 
-        for group_idx in range(len(block_infos_by_group)):
-            for block_info in block_infos_by_group[group_idx]:
-                key = (block_info[0], session_id)
-                if key in self._entries:
-                    old_entry = self._entries[key]
-                    if expire_at > old_entry.ttl_expire_at:
-                        self._timer_wheel.remove(old_entry)
-                        old_entry.ttl_expire_at = expire_at
-                        old_entry.block_hashes = block_info[1]
-                        self._timer_wheel.insert(old_entry, expire_at)
+            else:
+                entry = TTLBlockEntry(
+                    block_id=block_info[0],
+                    session_id=session_id,
+                    ttl_expire_at=expire_at,
+                    block_hashes=block_info[1]
+                )
+                self._entries[key] = entry
+                self._timer_wheel.insert(entry, expire_at)
+            logger.info(
+                f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
 
-                else:
-                    entry = TTLBlockEntry(
-                        block_id=block_info[0],
-                        session_id=session_id,
-                        ttl_expire_at=expire_at,
-                        block_hashes=block_info[1]
-                    )
-                    self._entries[key] = entry
-                    self._timer_wheel.insert(entry, expire_at)
-                logger.info(
-                    f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
-                self._last_prefix_hashes_by_group[group_idx].extend(block_info[1])
-
-        max_hash_count_idx = max(enumerate(self._last_prefix_hashes_by_group), key=lambda x: len(x[1]))[0]
-        waiting_block_hashes = self._last_prefix_hashes_by_group[max_hash_count_idx]
+        waiting_block_hashes = protected_block_hashes
         if len(waiting_block_hashes) > 0:
             self._spm_notify_func("session_blocks_protected", session_id=session_id, block_hashes=waiting_block_hashes)
 
-        if not new_registration:
-            # reset _last_prefix_hashes_by_group
-            self._last_prefix_hashes_by_group = None
 
     def remove(self, block_id: int, session_id: str, is_notify_spm: bool = True) -> None:
         """显式移除一个 block 的 TTL 跟踪。
