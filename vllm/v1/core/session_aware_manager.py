@@ -918,6 +918,7 @@ class TTLManager:
         self._on_expired = on_expired
         self._spm_notify_func = notify_func
         self._entries: dict[tuple[int, str], TTLBlockEntry] = {}
+        self._session_protected_block_ids: dict[str, set[int]] = {}
         self._timer_wheel = TTLTimerWheel(tick_count=3600)
 
         logger.info("TTLManager initialized with on_expired=%s",
@@ -957,7 +958,7 @@ class TTLManager:
                 self._timer_wheel.insert(entry, expire_at)
             logger.info(
                 f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
-
+            self._session_protected_block_ids.setdefault(session_id, set()).update(block_info[0])
         waiting_block_hashes = protected_block_hashes
         if len(waiting_block_hashes) > 0:
             self._spm_notify_func("session_blocks_protected", session_id=session_id, block_hashes=waiting_block_hashes)
@@ -968,19 +969,27 @@ class TTLManager:
 
         同时从 ``_entries`` 和 timer wheel 中删除。如果不存在则静默忽略。
         """
-        key = (block_id, session_id)
-        remove_hashes = set()
-        if key in self._entries:
-            if is_notify_spm:
-                entry = self._entries.pop(key)
-                self._timer_wheel.remove(entry)
-                remove_hashes.update(entry.block_hashes)
-                self._spm_notify_func("session_ttl_expired", session_id=session_id, block_hashes=list(remove_hashes))
-            else:
-                entry = self._entries[key]
-                entry.update_SPM_only = True
+        remove_block_ids = []
+        if block_id == -1:
+            remove_block_ids.extend(list(self._session_protected_block_ids.setdefault(session_id, set())))
         else:
-            logger.info(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
+            remove_block_ids.append(remove_block_ids)
+
+        for process_block_id in remove_block_ids:
+            key = (process_block_id, session_id)
+            remove_hashes = set()
+            if key in self._entries:
+                if is_notify_spm:
+                    entry = self._entries.pop(key)
+                    self._timer_wheel.remove(entry)
+                    remove_hashes.update(entry.block_hashes)
+                    self._spm_notify_func("session_ttl_expired", session_id=session_id, block_hashes=list(remove_hashes))
+                    self._update_session_protected_blocks(session_id, process_block_id)
+                else:
+                    entry = self._entries[key]
+                    entry.update_SPM_only = True
+            else:
+                logger.info(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
 
 
     def tick(self, now: float | None = None) -> None:
@@ -999,15 +1008,19 @@ class TTLManager:
         expired_entries = self._timer_wheel.advance(now)
         for entry in expired_entries:
             if now >= entry.ttl_expire_at:
+                block_id, session_id = entry[0], entry[1]
                 self._entries.pop(
                     (entry.block_id, entry.session_id), None)
-                if entry.update_SPM_only:
-                    self._spm_notify_func("session_ttl_expired", session_id=entry.session_id,
-                                      block_hashes=entry.block_hashes)
-                    continue
-                self._on_expired(entry.block_id, entry.session_id)
-                self._spm_notify_func("session_ttl_expired", session_id=entry.session_id,
-                                      block_hashes=entry.block_hashes)
+                self._spm_notify_func("session_ttl_expired", session_id=entry.session_id, block_hashes=entry.block_hashes)
+                self._update_session_protected_blocks(session_id, block_id)
+                if not entry.update_SPM_only:
+                    self._on_expired(entry.block_id, entry.session_id)
+
+    def _update_session_protected_blocks(self, session_id: str, block_id: int):
+        if session_id in self._session_protected_block_ids:
+            self._session_protected_block_ids[session_id].discard(block_id)
+            if len(self._session_protected_block_ids[session_id]) == 0:
+                del self._session_protected_block_ids[session_id]
 
 def example_expired_callback(block_id: int, session_id: str) -> None:
     logger.info(f"block_id {block_id} and session_id {session_id} is processing on TTL expiration")
