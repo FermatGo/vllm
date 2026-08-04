@@ -169,6 +169,7 @@ class SessionAwareManager:
         now = time.monotonic()
         newly_protected_hashes: list[tuple(int, list[BlockHash])] = []
         newly_protected_ttl: float = 0.0
+        protected_block_hashes: list[BlockHash] = []
 
         for group_id, block_ids in enumerate(blocks.get_block_ids()):
 
@@ -258,8 +259,9 @@ class SessionAwareManager:
 
         # 最新request的ttl时间
         now = time.monotonic()
-        newly_protected_hashes: list[list[tuple(int, list[BlockHash])]] = [[] for _ in range(self.num_kv_cache_groups)]
+        newly_protected_hashes: list[tuple(int, list[BlockHash])] = []
         newly_protected_ttl: float = 0.0
+        protected_block_hashes: list[BlockHash] = []
 
         for group_id, block_ids in enumerate(blocks.get_block_ids()):
 
@@ -301,7 +303,7 @@ class SessionAwareManager:
                         self._add_session_block_ref(record, group_id)
 
                         # self._ttl_manager.update(block_id, session_id, new_expire_at)
-                        newly_protected_hashes[group_id].append(
+                        newly_protected_hashes.append(
                             (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                         newly_protected_ttl = new_expire_at
 
@@ -327,7 +329,7 @@ class SessionAwareManager:
                     self._add_session_block_ref(record, group_id)
 
                     if is_ephemeral:
-                        newly_protected_hashes[group_id].append(
+                        newly_protected_hashes.append(
                             (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
                         newly_protected_ttl = requested_expire_at
 
@@ -697,7 +699,7 @@ class SessionAwareManager:
                 block_id = hash_block.get(target_hash)
 
                 if block_id is None:
-                    logger.warning(
+                    logger.debug(
                         f'block not found, target block hash:{target_hash}, '
                         f'block index:{group_index*scale_factor}')
                     continue
@@ -745,6 +747,7 @@ class TTLBlockEntry:
     session_id: str
     ttl_expire_at: float
     block_hashes: list[BlockHash]
+    update_SPM_only: bool = False
 
 
 class TTLTimerWheel:
@@ -940,6 +943,7 @@ class TTLManager:
                     self._timer_wheel.remove(old_entry)
                     old_entry.ttl_expire_at = expire_at
                     old_entry.block_hashes = block_info[1]
+                    old_entry.update_SPM_only = False
                     self._timer_wheel.insert(old_entry, expire_at)
 
             else:
@@ -967,14 +971,17 @@ class TTLManager:
         key = (block_id, session_id)
         remove_hashes = set()
         if key in self._entries:
-            entry = self._entries.pop(key)
-            self._timer_wheel.remove(entry)
-            remove_hashes.update(entry.block_hashes)
+            if is_notify_spm:
+                entry = self._entries.pop(key)
+                self._timer_wheel.remove(entry)
+                remove_hashes.update(entry.block_hashes)
+                self._spm_notify_func("session_ttl_expired", session_id=session_id, block_hashes=list(remove_hashes))
+            else:
+                entry = self._entries[key]
+                entry.update_SPM_only = True
         else:
             logger.info(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
 
-        if is_notify_spm:
-            self._spm_notify_func("session_ttl_expired", session_id=session_id, block_hashes=list(remove_hashes))
 
     def tick(self, now: float | None = None) -> None:
         """推进 timer wheel，处理所有已过期的 entry。
@@ -994,6 +1001,10 @@ class TTLManager:
             if now >= entry.ttl_expire_at:
                 self._entries.pop(
                     (entry.block_id, entry.session_id), None)
+                if entry.update_SPM_only:
+                    self._spm_notify_func("session_ttl_expired", session_id=entry.session_id,
+                                      block_hashes=entry.block_hashes)
+                    continue
                 self._on_expired(entry.block_id, entry.session_id)
                 self._spm_notify_func("session_ttl_expired", session_id=entry.session_id,
                                       block_hashes=entry.block_hashes)

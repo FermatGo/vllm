@@ -100,7 +100,7 @@ class SessionKeyTracker:
             if session_id is None:
                 logger.warning("SessionKeyTracker.remove_hash: session_id cannot be None")
                 return removed_nums
-            if block_hashes is None or len(block_hashes) == 0:
+            if block_hashes is None:
                 logger.warning(f"SessionKeyTracker.remove_hash: invalid block_hashes {block_hashes}")
                 return removed_nums
             list_hashes = self._session_hashes.get(session_id, [])
