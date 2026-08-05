@@ -510,12 +510,12 @@ class SessionAwareManager:
                 if len(cur_block_session) == 0 or record is None:
                     continue
 
-                # if record.is_ephemeral:
-                #     self._ttl_manager.remove(block_id=block_id, session_id=session_id, is_notify_spm=False)
+                if record.is_ephemeral:
+                    self._ttl_manager.remove(block_id=block_id, session_id=session_id, is_notify_spm=False)
 
-                #     block = self.kv_cache_manager.block_pool.blocks[block_id]
-                #     affected_block_hashes.extend(
-                #         split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
+                    block = self.kv_cache_manager.block_pool.blocks[block_id]
+                    affected_block_hashes.extend(
+                        split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
 
                 self._remove_session_block_ref(session_id, block_id, group_id)
 
@@ -532,8 +532,6 @@ class SessionAwareManager:
                     delta_ref=-1,
                     ttl_expire_at=latest_ttl_expire_at,
                 )
-        
-        self._ttl_manager.remove(block_id=-1, session_id=session_id, is_notify_spm=False)
 
         res = len(affected_block_hashes)
 
@@ -575,12 +573,12 @@ class SessionAwareManager:
                     if len(cur_block_session) == 0 or record is None:
                         continue
 
-                    if record.is_ephemeral:
-                        self._ttl_manager.remove(block_id, session_id)
+                    # if record.is_ephemeral:
+                    #     self._ttl_manager.remove(block_id, session_id)
 
-                        block = self.kv_cache_manager.block_pool.blocks[block_id]
-                        affected_block_hashes.extend(
-                            split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
+                    #     block = self.kv_cache_manager.block_pool.blocks[block_id]
+                    #     affected_block_hashes.extend(
+                    #         split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
 
                     self._remove_session_block_ref(session_id, block_id, group_id)
                     
@@ -600,7 +598,7 @@ class SessionAwareManager:
 
         else:
             affected_block_hashes = self.free_session_tree(session_id)
-
+        self._ttl_manager.remove(block_id=-1, session_id=session_id)
         res = len(affected_block_hashes)
         return res
 
@@ -960,7 +958,7 @@ class TTLManager:
                 self._timer_wheel.insert(entry, expire_at)
             logger.info(
                 f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
-            self._session_protected_block_ids.setdefault(session_id, set()).update(block_info[0])
+            self._session_protected_block_ids.setdefault(session_id, set()).add(block_info[0])
         waiting_block_hashes = protected_block_hashes
         if len(waiting_block_hashes) > 0:
             self._spm_notify_func("session_blocks_protected", session_id=session_id, block_hashes=waiting_block_hashes)
@@ -975,7 +973,7 @@ class TTLManager:
         if block_id == -1:
             remove_block_ids.extend(list(self._session_protected_block_ids.setdefault(session_id, set())))
         else:
-            remove_block_ids.append(remove_block_ids)
+            remove_block_ids.append(block_id)
 
         for process_block_id in remove_block_ids:
             key = (process_block_id, session_id)
