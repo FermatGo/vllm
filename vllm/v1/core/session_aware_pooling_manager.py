@@ -19,10 +19,6 @@ class SPMConfig:
     keep_alive_interval: int = 60          # Keep-Alive 刷新间隔（秒）
     max_keys_per_cycle: int = 1024        # 每轮最多刷新的 key 数
 
-    # 驱逐配置
-    enable_eviction: bool = True           # 是否启用主动驱逐
-    eviction_grace_period: float = 30.0   # 驱逐宽限期（秒）
-
     # 预取配置
     enable_prefetch: bool = True          # 是否启用主动预取
     prefetch_max_queue_size: int = 16     # 预取队列最大长度
@@ -39,15 +35,6 @@ class PrefetchRequest:
     created_at: float            # 创建时间
     dest_block_ids: tuple[list[int], ...] | list[int] | list[list[int]] | None   # 待搬入block ids
     priority: int = 0            # 优先级（0=最高，由 manage_request 触发）
-
-
-@dataclass
-class EvictionMark:
-    """驱逐标记 — 标记 session 的远端 KV cache 为可驱逐"""
-    session_id: str
-    pool_keys: list[str]         # 被标记的 PoolKey
-    evict_at: float             # 预期驱逐时间（给 Keep-Alive 一点缓冲）
-    is_partial: bool = False   # 是否部分驱逐
 
 
 class SessionKeyTracker:
@@ -79,16 +66,6 @@ class SessionKeyTracker:
             self._session_hashes[session_id] = block_hashes
             logger.debug(f"SessionKeyTracker.add_hashes: session_id: {session_id}, block_hashes saved: {block_hashes}")
 
-    def append_hashes(
-            self,
-            session_id: str,
-            block_hashes: list[BlockHash],
-    ) -> None:
-        with self._lock:
-            self._session_hashes.setdefault(session_id, []).extend(block_hashes)
-            logger.debug(
-                f"SessionKeyTracker.append_hashes: session_id: {session_id}, block_hashes saved: {block_hashes}")
-
     def remove_hashes(
         self,
         session_id,
@@ -105,7 +82,7 @@ class SessionKeyTracker:
                 return removed_nums
             list_hashes = self._session_hashes.get(session_id, [])
             if not set(block_hashes).issubset(set(list_hashes)):
-                logger.warning(f"SessionKeyTracker.remove_hash: invalid block_hashes {block_hashes} or invalid session_id: {session_id}")
+                logger.debug(f"SessionKeyTracker.remove_hash: invalid block_hashes {block_hashes} or invalid session_id: {session_id}")
                 return removed_nums
 
             list_hashes = self._session_hashes.pop(session_id, [])
@@ -187,9 +164,6 @@ class SessionAwarePoolingManager(SessionEventListener):
         # 进行预取中的队列
         self.prefetch_running_queue: list[Request] = []
 
-        # 驱逐标记队列
-        self._eviction_marks: dict[str, EvictionMark] = {}
-
         # 注册为 SAM 事件监听器
         sam.add_event_listener(self)
 
@@ -217,11 +191,6 @@ class SessionAwarePoolingManager(SessionEventListener):
 
     # --- SessionEventListener 实现 ---
 
-    def on_session_registered(self, session_id: str, parent_session_id: str | None) -> None:
-        """Session 注册时初始化 tracker 记录"""
-        # key_tracker 按需初始化，无需预分配
-        return
-
     # 可以通过ascend的pool_worker的回调函数来调用key_tracker.add_keys
     def on_session_blocks_protected(
         self,
@@ -238,14 +207,6 @@ class SessionAwarePoolingManager(SessionEventListener):
     ) -> int:
         """block 移除"""
         return self.key_tracker.remove_hashes(session_id, block_hashes)
-
-    def on_session_freed(self, session_id: str) -> None:
-        """Session 被清理时移除所有 PoolKey 关联并标记驱逐"""
-        return
-
-    def on_context_management_offload(self, session_id: str, block_ids: list[int]) -> None:
-        """offload 操作时仅移除本地 block 引用，远端 KV cache 保留"""
-        return
 
     # --- 调度循环集成 ---
     def _lookup_remote_cache(self, block_hashes: list[BlockHash], token_len: int) -> int:
@@ -275,18 +236,6 @@ class SessionAwarePoolingManager(SessionEventListener):
             prefetch_req, matched_tokens
         )
 
-    def process_eviction_marks(self, now: float | None = None) -> None:
-        """处理驱逐标记 — 停止 Keep-Alive 保护"""
-        return
-
-    def _mark_for_eviction(
-        self,
-        session_id: str,
-        pool_keys: list[str],
-        is_partial: bool = False,
-    ) -> None:
-        return
-
     def _get_block_pool_keys(self, block_id: int) -> list[str]:
         """通过 block_id 查找对应的 PoolKey（需要从 KVCacheManager 获取 block_hash）"""
         # block_id → block_hash → PoolKey
@@ -294,7 +243,6 @@ class SessionAwarePoolingManager(SessionEventListener):
         # 实现时需要与 KVCacheManager/AscendStoreConnector 协调
         return []
 
-##############################################################
     def on_session_blocks_allocated(
         self,
         session_id: str | None = None,
