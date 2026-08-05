@@ -506,8 +506,8 @@ class KVCacheManager:
             request: The request to free the blocks.
         """
         self.coordinator.free(request.request_id)
-        logger.info(f'======= is_zone_b_sorted: {self.block_pool.free_block_queue.is_zone_b_sorted()}')
-        logger.info(f'======= is_zone_c_sorted: {self.block_pool.free_block_queue.is_zone_c_sorted()}')
+        # logger.info(f'======= is_zone_b_sorted: {self.block_pool.free_block_queue.is_zone_b_sorted()}')
+        # logger.info(f'======= is_zone_c_sorted: {self.block_pool.free_block_queue.is_zone_c_sorted()}')
 
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int

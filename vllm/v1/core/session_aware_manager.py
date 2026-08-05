@@ -576,9 +576,9 @@ class SessionAwareManager:
                     # if record.is_ephemeral:
                     #     self._ttl_manager.remove(block_id, session_id)
 
-                    #     block = self.kv_cache_manager.block_pool.blocks[block_id]
-                    #     affected_block_hashes.extend(
-                    #         split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
+                    block = self.kv_cache_manager.block_pool.blocks[block_id]
+                    affected_block_hashes.extend(
+                        split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
 
                     self._remove_session_block_ref(session_id, block_id, group_id)
                     
@@ -598,6 +598,7 @@ class SessionAwareManager:
 
         else:
             affected_block_hashes = self.free_session_tree(session_id)
+
         self._ttl_manager.remove(block_id=-1, session_id=session_id)
         res = len(affected_block_hashes)
         return res
