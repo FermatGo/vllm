@@ -516,28 +516,13 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        #TODO: move to SAM and call SAM.ttl_manager in schedule()
-        #logger.info("start to check cache ttl in scheduler")
         self.session_aware_manager._ttl_manager.tick()
-        #logger.info("finish to check cache ttl in scheduler")
-        # SPM处理prefetch
         if self.session_pooling_manager is not None:
             self.process_prefetch_req()
 
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
             self.session_aware_manager._session_block_hash[request.session_id] = request.block_hashes
-
-            # ===== schedule, request = <vllm.v1.request.Request object at 0xfffb38179b90>,
-            # request.session_id = sub-1, request.parent_session_id = main-0, request.ttl = 10.0,
-            # request.cache_control = CacheControlParams(type='ephemeral', ttl=10.0, msg_offset=6, block_offset=1, token_offset=2),
-            # request.context_management = ContextManagementParams(manage_request=False,
-            #   edits=[ContextManagementEditsParams(type='offload', start=6, end=9, target='messages', block_start=3, block_end=4),
-            #   ContextManagementEditsParams(type='offload', start=6, end=9, target='messages', block_start=3, block_end=4)]),
-            #   request.session_management_flag = 0
-            # logger.info(f'===== schedule, request = {request}, request.session_id = {request.session_id}, request.parent_session_id = {request.parent_session_id}, '
-            #                f'request.ttl = {request.ttl}, request.cache_control = {request.cache_control}, request.context_management = {request.context_management}, '
-            #                f'request.session_management_flag = {request.session_management_flag}')
 
             if (
                 request.num_output_placeholders > 0
