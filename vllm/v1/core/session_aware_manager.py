@@ -233,15 +233,16 @@ class SessionAwareManager:
                     ttl_expire_at=ttl_expire_at,
                 )
 
-        scale_factor = max(self.block_size) // self.hash_block_size
-        session_block_hash = self._session_block_hash.get(session_id)
-        block_end = (ephemeral_range.block_offset + scale_factor) // scale_factor * scale_factor  
-        if ephemeral_range.block_offset+1 > len(session_block_hash):
-            logger.warning(f'ephemeral range exceed session block hash. session id:{session_id}')
-            block_end = len(session_block_hash)
+        if ephemeral_range:
+            scale_factor = max(self.block_size) // self.hash_block_size
+            session_block_hash = self._session_block_hash.get(session_id)
+            block_end = (ephemeral_range.block_offset + scale_factor) // scale_factor * scale_factor  
+            if ephemeral_range.block_offset+1 > len(session_block_hash):
+                logger.warning(f'ephemeral range exceed session block hash. session id:{session_id}')
+                block_end = len(session_block_hash)
             
-        if newly_protected_hashes and session_block_hash:
-            protected_block_hashes = session_block_hash[0:block_end]
+            if newly_protected_hashes and session_block_hash:
+                protected_block_hashes = session_block_hash[0:block_end]
         
         self._ttl_manager.register(block_infos=newly_protected_hashes, session_id=session_id,
                                    expire_at=newly_protected_ttl, protected_block_hashes=protected_block_hashes)
@@ -346,16 +347,16 @@ class SessionAwareManager:
                         delta_ref=+1,
                         ttl_expire_at=block_expire_at,
                     )
-
-        scale_factor = max(self.block_size) // self.hash_block_size
-        session_block_hash = self._session_block_hash.get(session_id)
-        block_end = (ephemeral_range.block_offset + scale_factor) // scale_factor * scale_factor  
-        if ephemeral_range.block_offset+1 > len(session_block_hash):
-            logger.warning(f'ephemeral range exceed session block hash. session id:{session_id}')
-            block_end = len(session_block_hash)
-            
-        if newly_protected_hashes and session_block_hash:
-            protected_block_hashes = session_block_hash[0:block_end]
+        if ephemeral_range:
+            scale_factor = max(self.block_size) // self.hash_block_size
+            session_block_hash = self._session_block_hash.get(session_id)
+            block_end = (ephemeral_range.block_offset + scale_factor) // scale_factor * scale_factor  
+            if ephemeral_range.block_offset+1 > len(session_block_hash):
+                logger.warning(f'ephemeral range exceed session block hash. session id:{session_id}')
+                block_end = len(session_block_hash)
+                
+            if newly_protected_hashes and session_block_hash:
+                protected_block_hashes = session_block_hash[0:block_end]
 
         self._ttl_manager.register(newly_protected_hashes, session_id, newly_protected_ttl, protected_block_hashes=protected_block_hashes)
 
