@@ -1009,7 +1009,7 @@ class TTLManager:
         expired_entries = self._timer_wheel.advance(now)
         for entry in expired_entries:
             if now >= entry.ttl_expire_at:
-                block_id, session_id = entry[0], entry[1]
+                block_id, session_id = entry.block_id, entry.session_id
                 self._entries.pop(
                     (entry.block_id, entry.session_id), None)
                 self._spm_notify_func("session_ttl_expired", session_id=entry.session_id, block_hashes=entry.block_hashes)
