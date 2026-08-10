@@ -119,7 +119,26 @@ class SessionAwareManager:
         blocks: KVCacheBlocks,
         cached_blocks_len_before: tuple[int, ...] | None = None
     ) -> None:
+        # 如果 request 没有 session_id，则不进行 session 相关的处理
+        # 但是清理所有 block 的 session 引用和 TTL，避免残留
         if request.session_id is None:
+            for group_id, block_ids in enumerate(blocks.get_block_ids()):
+                for block_id in block_ids:
+                    block = self.kv_cache_manager.block_pool.blocks[block_id]
+
+                    # block本身清理的session_ref_cnt和ttl_expire_at
+                    block._session_ref_cnt = 0
+                    block._ttl_expire_at = 0.0
+
+                    # 清理TTLManager中这个物理 block 的所有旧 session 引用
+                    old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
+                    for old_session_id in old_session_ids:
+                        record = self._block_sessions[group_id][block_id].get(old_session_id)
+                        if record and record.is_ephemeral:
+                            self._ttl_manager.remove(block_id, old_session_id)
+
+                    # 清理SAM中这个物理 block 的所有旧 session 引用。
+                    self._clear_block_session_refs(block_id, group_id)
             return
 
         logger.info(f'===== on_blocks_allocated_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
@@ -179,21 +198,24 @@ class SessionAwareManager:
             for ind, block_id in enumerate(block_ids):
                 block = self.kv_cache_manager.block_pool.blocks[block_id]
 
+                # block本身清理的session_ref_cnt和ttl_expire_at
+                block._session_ref_cnt = 0
+                block._ttl_expire_at = 0.0
+
+                # 清理TTLManager中这个物理 block 的所有旧 session 引用
+                old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
+                for old_session_id in old_session_ids:
+                    record = self._block_sessions[group_id][block_id].get(old_session_id)
+                    if record and record.is_ephemeral:
+                        self._ttl_manager.remove(block_id, old_session_id)
+
+                # 清理SAM中这个物理 block 的所有旧 session 引用。
+                self._clear_block_session_refs(block_id, group_id)
+
                 # allocate_slots理论上只传 newly-cached blocks，保留检查用于防御异常情况。
                 if block.block_hash is None:
                     logger.warning("Newly cached block %s has no block hash", block_id)
                     break
-
-                # get_new_blocks() 已经清理 block._session_ref_cnt 和
-                # block._ttl_expire_at，但没有清理 SAM 双向索引和 TTLManager。
-                old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
-                for old_session_id in old_session_ids:
-                    record = self._block_sessions[group_id][block_id].get(session_id)
-                    if record and record.is_ephemeral:
-                        self._ttl_manager.remove(block_id, old_session_id)
-
-                # 统一清理 SAM 中这个物理 block 的所有旧 session 引用。
-                self._clear_block_session_refs(block_id, group_id)
 
                 # SessionBlockRecord所需参数计算
                 is_ephemeral = (

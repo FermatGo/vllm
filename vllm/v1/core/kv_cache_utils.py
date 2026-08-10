@@ -240,24 +240,8 @@ class FreeKVCacheBlockQueue:
             else None)
         self.zone2_end: KVCacheBlock | None = None
 
-    def popleft(self, check_ttl: bool = True) -> KVCacheBlock:
-        """Pop from zone A first, then zone B, and reduce num_free_blocks by 1.
-        Zone C is not allocatable unless a block's TTL has expired. When A/B are
-        empty, lazily scan C and promote expired blocks to A/B.
-
-        Returns:
-            The first free block.
-        """
-        if (
-            self.fake_free_list_head.next_free_block is self.fake_free_list_tail
-            or self.fake_free_list_head.next_free_block is None
-        ):
-            assert self.num_free_blocks == 0, (
-                f"num_free_blocks ({self.num_free_blocks}) is out of sync "
-                "with the free list."
-            )
-            raise ValueError("No free blocks available")
-
+    def lazy_scan_zone_c(self, check_ttl) -> None:
+        """Lazy TTL expiry: scan C zone first, promote expired blocks to A/B."""
         if check_ttl:
             # Lazy TTL expiry: scan C zone first, promote expired blocks to A/B.
             if self.zone2_end is not None:
@@ -300,9 +284,25 @@ class FreeKVCacheBlockQueue:
 
                 curr_block = next_block
 
-        # 开放C区
-        if self.zone1_end is None and self.zone2_end is None:
-            logger.warning('----- Open C Zone')
+    def popleft(self, check_ttl: bool = True) -> KVCacheBlock:
+        """Pop from zone A first, then zone B, and reduce num_free_blocks by 1.
+        Zone C is not allocatable unless a block's TTL has expired. When A/B are
+        empty, lazily scan C and promote expired blocks to A/B.
+
+        Returns:
+            The first free block.
+        """
+        if (
+            self.fake_free_list_head.next_free_block is self.fake_free_list_tail
+            or self.fake_free_list_head.next_free_block is None
+        ):
+            assert self.num_free_blocks == 0, (
+                f"num_free_blocks ({self.num_free_blocks}) is out of sync "
+                "with the free list."
+            )
+            raise ValueError("No free blocks available")
+
+        self.lazy_scan_zone_c(check_ttl)
 
         first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
 
