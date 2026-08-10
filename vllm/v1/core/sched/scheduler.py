@@ -308,8 +308,9 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             logger.warning(f"scheduler does not have connector, failed to init SPM")
         else:
-            self.session_pooling_manager = SessionAwarePoolingManager(self.session_aware_manager, self.connector)
-            # TODO: 确认传入的blocksize是最小的hash block size
+            self.session_pooling_manager = SessionAwarePoolingManager(sam=self.session_aware_manager,
+                                                                      add_request=self.add_request,
+                                                                      connector=self.connector)
             self.session_pooling_manager.block_size = hash_block_size
             self.session_pooling_manager.start()
             logger.info(f"Init session pooling manager self.block_size {self.block_size} hash_block_size {hash_block_size}")
@@ -518,7 +519,7 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         self.session_aware_manager._ttl_manager.tick()
         if self.session_pooling_manager is not None:
-            self.process_prefetch_req()
+            self.session_pooling_manager.process_prefetch_req(num_unfinished_requests=self.get_num_unfinished_requests())
 
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
