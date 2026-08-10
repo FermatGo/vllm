@@ -2447,9 +2447,3 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
-
-    def free_session(self, session_id: str) -> dict:
-        return self.session_aware_manager.free_session(session_id)
-
-    def free_session_tree(self, session_id: str) -> dict:
-        return self.session_aware_manager.free_session_tree(session_id)

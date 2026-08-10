@@ -303,7 +303,6 @@ class FreeKVCacheBlockQueue:
         # 开放C区
         if self.zone1_end is None and self.zone2_end is None:
             logger.warning('----- Open C Zone')
-        #     raise ValueError("No allocatable free blocks available")
 
         first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
 
