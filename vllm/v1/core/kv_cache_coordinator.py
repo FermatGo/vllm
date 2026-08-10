@@ -269,7 +269,6 @@ class KVCacheCoordinator(ABC):
 
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
-        # self.block_pool.advance_ttl_timer()
         for manager in self.single_type_managers:
             manager.new_step_starts()
 
@@ -501,7 +500,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         Args:
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
-        
+
         Returns:
             A tuple containing:
                 - A tuple of the cache hit blocks for each single type manager.

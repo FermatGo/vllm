@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -69,9 +68,6 @@ class BlockHashToBlockMap:
             if isinstance(blocks, KVCacheBlock):
                 return blocks
             if isinstance(blocks, dict):
-                for block in blocks.values():
-                    if block._session_ref_cnt > 0:
-                        return block
                 return next(iter(blocks.values()))
             self._unexpected_blocks_type(blocks)
         return None
@@ -195,7 +191,7 @@ class BlockPool:
         Args:
             block_hash: The hash value of the block.
             kv_cache_group_ids: The ids of the KV cache groups.
-        
+
         Returns:
             The cached blocks if exists, or None.
         """
