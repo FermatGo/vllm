@@ -24,7 +24,7 @@ from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
-from vllm.v1.engine import CacheControlParams, ContextManagementParams, ContextManagementEditsParams
+from vllm.v1.engine import CacheControlParams, ContextManagementParams, ContextManagementEditsParams, AgentHintParams
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
@@ -77,12 +77,7 @@ class Request:
         resumable: bool = False,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
-        session_id: str | None = None,  # 请求所属的session
-        parent_session_id: str | None = None,  # 上级session ID（仅用于清理分组）
-        ttl: float | None = None,  # 请求结束后block保留时间（秒）
-        cache_control: CacheControlParams | None = None,
-        context_management: ContextManagementParams | None = None,
-        session_management_flag: int = 0,  # 0：忽略，1：free_session
+        agent_hint: AgentHintParams | None = None,
         is_prefetch_req: bool = False
     ) -> None:
         self.request_id = request_id
@@ -188,12 +183,7 @@ class Request:
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
         # agent_hint
-        self.session_id = session_id
-        self.parent_session_id = parent_session_id
-        self.ttl = ttl
-        self.cache_control = cache_control
-        self.context_management = context_management
-        self.session_management_flag = session_management_flag
+        self.agent_hint = agent_hint
 
     @classmethod
     def from_engine_core_request(
@@ -218,12 +208,7 @@ class Request:
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
-            session_id=request.session_id,
-            parent_session_id=request.parent_session_id,
-            ttl=request.ttl,
-            cache_control=request.cache_control,
-            context_management=request.context_management,
-            session_management_flag=request.session_management_flag
+            agent_hint=request.agent_hint
         )
 
     def append_output_token_ids(

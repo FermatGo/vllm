@@ -228,7 +228,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         # block_ids = self.sam.get_session_block_ids(prefetch_req.session_id)
         block_ids = prefetch_req.dest_block_ids
         if not block_ids:
-            logger.warning("Session %s has no allocated blocks, skipping prefetch", prefetch_req.session_id)
+            logger.warning("Session %s has no allocated blocks, skipping prefetch", prefetch_req.agent_hint.session_id if prefetch_req.agent_hint else None)
             return
 
         # 通过 KVPoolScheduler 注入 prefetch metadata

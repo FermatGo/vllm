@@ -41,6 +41,7 @@ def register_generate_api_routers(app: FastAPI):
 
     register_anthropic_api_router(app)
 
+
 async def init_generate_state(
     engine_client: "EngineClient",
     state: "State",

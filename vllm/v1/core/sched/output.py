@@ -61,7 +61,7 @@ class NewRequestData:
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prefill_token_ids=prefill_token_ids,
-            session_id=request.session_id
+            session_id=request.agent_hint.session_id if request.agent_hint else None
         )
 
     def __repr__(self) -> str:

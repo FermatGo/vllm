@@ -119,7 +119,7 @@ class SessionAwareManager:
         blocks: KVCacheBlocks,
         cached_blocks_len_before: tuple[int, ...] | None = None
     ) -> None:
-        if request.session_id is None:
+        if request.agent_hint is None or request.agent_hint.session_id is None:
             return
 
         logger.info(f'===== on_blocks_allocated_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
@@ -127,10 +127,10 @@ class SessionAwareManager:
         logger.info(f'request.num_output_tokens: {request.num_output_tokens}')
 
         self.on_blocks_allocated(
-            session_id=request.session_id,
-            parent_session_id=request.parent_session_id,
+            session_id=request.agent_hint.session_id,
+            parent_session_id=request.agent_hint.parent_session_id,
             blocks=blocks,
-            ephemeral_range=compute_ephemeral_range(request.cache_control),
+            ephemeral_range=compute_ephemeral_range(request.agent_hint.cache_control),
             cached_blocks_len_before=cached_blocks_len_before,
             is_prefill=is_prefill,
         )
@@ -141,16 +141,16 @@ class SessionAwareManager:
         blocks: KVCacheBlocks
     ) -> None:
 
-        if request.session_id is None:
+        if request.agent_hint is None or request.agent_hint.session_id is None:
             return
 
         logger.info(f'===== on_block_cache_hit_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
 
         self.on_blocks_cache_hit(
-            session_id=request.session_id, 
-            parent_session_id=request.parent_session_id,
+            session_id=request.agent_hint.session_id,
+            parent_session_id=request.agent_hint.parent_session_id,
             blocks=blocks,
-            ephemeral_range=compute_ephemeral_range(request.cache_control)
+            ephemeral_range=compute_ephemeral_range(request.agent_hint.cache_control)
         )
 
     def on_blocks_allocated(

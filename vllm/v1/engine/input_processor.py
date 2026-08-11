@@ -28,11 +28,109 @@ from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
-from vllm.v1.engine import EngineCoreRequest
-
-from vllm.v1.engine import CacheControlParams, ContextManagementParams, ContextManagementEditsParams
+from vllm.v1.engine import (
+    AgentHintParams,
+    CacheControlParams,
+    ContextManagementEditsParams,
+    ContextManagementParams,
+    EngineCoreRequest,
+)
 
 logger = init_logger(__name__)
+
+
+def _convert_agent_hint(agent_hint: Any) -> AgentHintParams | None:
+    """Convert a pydantic AgentHintParams (from the OpenAI protocol) into the
+    engine-side @dataclass AgentHintParams.
+
+    The OpenAI request layer uses pydantic models for ``agent_hint`` (see
+    ``vllm.entrypoints.openai.chat_completion.protocol``), but the engine core
+    serializes ``EngineCoreRequest`` with ``msgspec`` across process
+    boundaries. ``msgspec`` only knows how to encode the engine-side
+    ``@dataclass`` types declared in ``vllm.v1.engine``; passing a pydantic
+    ``BaseModel`` through would raise ``TypeError: Object of type ... is not
+    serializable`` inside ``MsgpackEncoder.encode`` and surface to the client
+    as an HTTP 500. This helper normalizes the pydantic objects (or plain
+    dicts) into the dataclasses the engine expects.
+    """
+    if agent_hint is None:
+        return None
+
+    # Already an engine-side dataclass, nothing to do.
+    if isinstance(agent_hint, AgentHintParams):
+        return agent_hint
+
+    # Support both pydantic models (use model_dump) and plain mappings.
+    if hasattr(agent_hint, "model_dump"):
+        ah = agent_hint.model_dump()
+    elif isinstance(agent_hint, Mapping):
+        ah = agent_hint
+    else:
+        # Unknown type - coerce best-effort via dict(); if that fails the
+        # request will fail fast with a clear error rather than a 500 deep
+        # inside the IPC encoder.
+        ah = dict(agent_hint)
+
+    cache_control = ah.get("cache_control")
+    if cache_control is not None and not isinstance(
+        cache_control, CacheControlParams
+    ):
+        cc = (
+            cache_control.model_dump()
+            if hasattr(cache_control, "model_dump")
+            else dict(cache_control)
+        )
+        cache_control = CacheControlParams(
+            type=cc.get("type", "ephemeral"),
+            ttl=cc.get("ttl", 300.0),
+            msg_offset=cc.get("msg_offset"),
+            block_offset=cc.get("block_offset"),
+            token_offset=cc.get("token_offset"),
+        )
+
+    context_management = ah.get("context_management")
+    if context_management is not None and not isinstance(
+        context_management, ContextManagementParams
+    ):
+        cm = (
+            context_management.model_dump()
+            if hasattr(context_management, "model_dump")
+            else dict(context_management)
+        )
+        raw_edits = cm.get("edits") or []
+        edits: list[ContextManagementEditsParams] = []
+        for raw_edit in raw_edits:
+            if isinstance(raw_edit, ContextManagementEditsParams):
+                edits.append(raw_edit)
+                continue
+            e = (
+                raw_edit.model_dump()
+                if hasattr(raw_edit, "model_dump")
+                else dict(raw_edit)
+            )
+            edits.append(
+                ContextManagementEditsParams(
+                    type=e.get("type", "offload"),
+                    start=e.get("start", 0),
+                    end=e.get("end", 0),
+                    target=e.get("target", "messages"),
+                    block_start=e.get("block_start"),
+                    block_end=e.get("block_end"),
+                )
+            )
+        context_management = ContextManagementParams(
+            manage_request=cm.get("manage_request", False),
+            edits=edits,
+        )
+
+    return AgentHintParams(
+        session_id=ah.get("session_id"),
+        parent_session_id=ah.get("parent_session_id"),
+        cache_control=cache_control,
+        context_management=context_management,
+        latency_control=ah.get("latency_control"),
+        priority_control=ah.get("priority_control"),
+    )
 
 
 class InputProcessor:
@@ -360,21 +458,7 @@ class InputProcessor:
                 )
 
 
-        cache_control = CacheControlParams(
-                type=prompt["cache_control"].type,
-                ttl=prompt["cache_control"].ttl,
-                msg_offset=prompt["cache_control"].msg_offset,
-                block_offset=prompt["cache_control"].block_offset,
-                token_offset=prompt["cache_control"].token_offset,
-            ) if prompt.get("cache_control") else None
-
-        context_management = ContextManagementParams(
-                manage_request=prompt["context_management"].manage_request,
-                edits=None if prompt["context_management"].edits is None else
-                [ContextManagementEditsParams(type=e.type, start=e.start,
-                                              end=e.end, target=e.target,
-                                              block_start=e.block_start, block_end=e.block_end) for e in prompt["context_management"].edits]) if prompt.get("context_management") else None
-
+        agent_hint = _convert_agent_hint(prompt.get("agent_hint"))
 
         return EngineCoreRequest(
             request_id=request_id,
@@ -390,12 +474,7 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
-            session_id=prompt["session_id"],
-            parent_session_id=prompt["parent_session_id"],
-            ttl=prompt["ttl"],
-            cache_control=cache_control,
-            context_management=context_management,
-            session_management_flag=prompt["session_management_flag"]
+            agent_hint=agent_hint
         )
 
     def _validate_prompt_len(

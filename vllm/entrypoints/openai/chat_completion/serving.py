@@ -1647,7 +1647,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             kv_transfer_params=final_res.kv_transfer_params,
-            agentHintSessionManagementResponse=final_res.agentHintSessionManagementResponse if final_res.agentHintSessionManagementResponse else None
+            agent_hint_session_management_response=final_res.agentHintSessionManagementResponse if final_res.agentHintSessionManagementResponse else None
         )
 
         # Log complete response if output logging is enabled

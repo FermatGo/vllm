@@ -103,6 +103,17 @@ class CacheControlParams:
     token_offset: int | None = None
 
 
+@dataclass
+class AgentHintParams:
+    """Agent 行为提示参数，通过 extra_body.agent_hint 传入"""
+    session_id: str | None = None
+    parent_session_id: str | None = None
+    cache_control: CacheControlParams | None = None
+    context_management: ContextManagementParams | None = None
+    latency_control: dict | None = None
+    priority_control: dict | None = None
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -143,12 +154,7 @@ class EngineCoreRequest(
     reasoning_parser_kwargs: dict[str, Any] | None = None
 
     # agent_hint
-    session_id: str | None = None
-    parent_session_id: str | None = None
-    ttl: float | None = None  # 保留时间（秒）
-    cache_control: CacheControlParams | None = None
-    context_management: ContextManagementParams | None = None
-    session_management_flag: int = 0  # 0：忽略，1：free_session
+    agent_hint: AgentHintParams | None = None
 
 
     @property

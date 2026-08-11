@@ -344,7 +344,8 @@ class EngineCore:
                 "Disabling KVTransfer for this request."
             )
         self.scheduler.register_request_context_management_edits(request.request_id,
-                                                                 request.session_id, request.context_management)
+                                                                 request.agent_hint.session_id if request.agent_hint else None,
+                                                                 request.agent_hint.context_management if request.agent_hint else None)
         self.scheduler.add_request(request)
         logger.info(f"================add req id {request.request_id} and num_prompt_tokens {request.num_prompt_tokens}")
 
@@ -1179,7 +1180,7 @@ class EngineCoreProc(EngineCore):
     def _is_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any) -> bool:
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            is_session_management = req and req.context_management and req.context_management.manage_request
+            is_session_management = req and req.agent_hint and req.agent_hint.context_management and req.agent_hint.context_management.manage_request
             return is_session_management
         return False
 
@@ -1187,12 +1188,15 @@ class EngineCoreProc(EngineCore):
     def _process_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any):
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            edits_results = self.scheduler.register_request_context_management_edits(req.request_id, req.session_id, req.context_management)
+            edits_results = self.scheduler.register_request_context_management_edits(
+                req.request_id,
+                req.agent_hint.session_id if req.agent_hint else None,
+                req.agent_hint.context_management if req.agent_hint else None)
 
             list = [
                 EngineCoreOutput(req.request_id, [1], finish_reason=FinishReason.LENGTH,
                                  agent_hint_response=AgentHintSessionManagementResponse(
-                                     session_id=req.session_id,
+                                     session_id=req.agent_hint.session_id if req.agent_hint else None,
                                      edit_results=edits_results
                                  ))
             ]

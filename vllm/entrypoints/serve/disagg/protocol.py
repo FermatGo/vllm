@@ -5,7 +5,10 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    AgentHintParams,
+    ChatCompletionLogProbs,
+)
 from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
@@ -106,6 +109,15 @@ class GenerateRequest(BaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+    agent_hint: AgentHintParams | None = Field(
+        default=None,
+        description=(
+            "Agent behavior hint forwarded from the chat completion "
+            "request. Carried through the render step so the generate "
+            "service can apply session/cache/context management."
+        ),
     )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:

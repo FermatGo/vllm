@@ -54,7 +54,7 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, ContextManagementEditsParams, ContextManagementParams
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, ContextManagementEditsParams, ContextManagementParams, AgentHintParams
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -386,7 +386,7 @@ class Scheduler(SchedulerInterface):
         #处理上一轮次prefetch
         for i in range(0, len(self.session_pooling_manager.prefetch_running_queue)):
             free_prefetch_running_req = self.session_pooling_manager.prefetch_running_queue[i]
-            logger.info(f"free prefetch request {free_prefetch_running_req.request_id} and session id {free_prefetch_running_req.session_id}")
+            logger.info(f"free prefetch request {free_prefetch_running_req.request_id} and session id {free_prefetch_running_req.agent_hint.session_id if free_prefetch_running_req.agent_hint else None}")
             self.kv_cache_manager.free(free_prefetch_running_req)
         self.session_pooling_manager.prefetch_running_queue = []
 
@@ -404,7 +404,7 @@ class Scheduler(SchedulerInterface):
                 local_computed_block_num = 0
 
                 local_hit_req = Request(request_id=tmp_prefetch_req.request_id,
-                                session_id=tmp_prefetch_req.session_id,
+                                agent_hint=AgentHintParams(session_id=tmp_prefetch_req.agent_hint.session_id if tmp_prefetch_req.agent_hint else None),
                                 prompt_token_ids=[0] * (tmp_prefetch_req.token_len+1),
                                 sampling_params=SamplingParams.from_optional(),
                                 pooling_params=None,
@@ -432,13 +432,13 @@ class Scheduler(SchedulerInterface):
                         external_matched_block_num = int(matched_tokens / hash_block_size)
                         exist_external_block_hash = tmp_prefetch_req.block_hashes[local_computed_block_num:external_matched_block_num]
                 logger.info(
-                    f"processing prefetch request {tmp_prefetch_req.request_id} session_id {tmp_prefetch_req.session_id} "
+                    f"processing prefetch request {tmp_prefetch_req.request_id} session_id {tmp_prefetch_req.agent_hint.session_id if tmp_prefetch_req.agent_hint else None} "
                     f"total_external_matched_tokens {total_external_matched_tokens} local_computed_tokens {local_computed_tokens}")
 
                 if total_external_matched_tokens + local_computed_tokens > 0:
                     # HBM/远端有命中，尝试分配KV
                     tmp_req = Request(request_id=tmp_prefetch_req.request_id,
-                                      session_id = tmp_prefetch_req.session_id,
+                                      agent_hint=AgentHintParams(session_id=tmp_prefetch_req.agent_hint.session_id if tmp_prefetch_req.agent_hint else None),
                                       prompt_token_ids = [0] * (total_external_matched_tokens+local_computed_tokens),
                                       sampling_params = SamplingParams.from_optional(),
                                       pooling_params = None,
@@ -522,7 +522,7 @@ class Scheduler(SchedulerInterface):
 
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            self.session_aware_manager._session_block_hash[request.session_id] = request.block_hashes
+            self.session_aware_manager._session_block_hash[request.agent_hint.session_id if request.agent_hint else None] = request.block_hashes
 
             if (
                 request.num_output_placeholders > 0
@@ -712,7 +712,7 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-                self.session_aware_manager._session_block_hash[request.session_id] = request.block_hashes
+                self.session_aware_manager._session_block_hash[request.agent_hint.session_id if request.agent_hint else None] = request.block_hashes
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
