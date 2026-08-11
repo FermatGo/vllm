@@ -347,7 +347,7 @@ class EngineCore:
                                                                  request.agent_hint.session_id if request.agent_hint else None,
                                                                  request.agent_hint.context_management if request.agent_hint else None)
         self.scheduler.add_request(request)
-        logger.info(f"================add req id {request.request_id} and num_prompt_tokens {request.num_prompt_tokens}")
+        logger.info(f"add request, request_id = {request.request_id}, num_prompt_tokens = {request.num_prompt_tokens}")
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""

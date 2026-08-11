@@ -142,7 +142,9 @@ class SessionAwareManager:
             return
 
         is_prefill = request.num_output_tokens == 0
-        logger.info(f'on_blocks_allocated_for_request, request_id = {request.request_id}, session_id = {request.agent_hint.session_id if request.agent_hint else None}, block_ids = {blocks.get_block_ids()}, request.num_output_tokens: {request.num_output_tokens}')
+        logger.info(f'on_blocks_allocated_for_request, request_id = {request.request_id}, '
+                    f'session_id = {request.agent_hint.session_id if request.agent_hint else None}, '
+                    f'block_ids = {blocks.get_block_ids()}, request.num_output_tokens: {request.num_output_tokens}')
 
         self.on_blocks_allocated(
             session_id=request.agent_hint.session_id,
@@ -162,7 +164,9 @@ class SessionAwareManager:
         if request.agent_hint is None or request.agent_hint.session_id is None:
             return
 
-        logger.info(f'===== on_block_cache_hit_for_request, blocks.get_block_ids() = {blocks.get_block_ids()}')
+        logger.info(f'on_block_cache_hit_for_request, request_id = {request.request_id}, '
+                    f'session_id = {request.agent_hint.session_id if request.agent_hint else None}, '
+                    f'block_ids = {blocks.get_block_ids()}')
 
         self.on_blocks_cache_hit(
             session_id=request.agent_hint.session_id,
@@ -191,7 +195,7 @@ class SessionAwareManager:
 
         for group_id, block_ids in enumerate(blocks.get_block_ids()):
 
-            logger.info("===== on_blocks_allocated, block_ids=%s", block_ids)
+            logger.info(f"on_blocks_allocated, block_ids={block_ids}")
             cached_blocks_len = cached_blocks_len_before[group_id] if cached_blocks_len_before else 0
 
             for ind, block_id in enumerate(block_ids):
