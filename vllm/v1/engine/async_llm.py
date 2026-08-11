@@ -693,6 +693,9 @@ class AsyncLLM(EngineClient):
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
+                    if num_outputs > 0 and outputs.have_manage_outputs():
+                        continue
+
                     if logger_ref[0]:
                         logger_ref[0].record(
                             engine_idx=outputs.engine_index,

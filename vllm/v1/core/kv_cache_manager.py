@@ -215,7 +215,7 @@ class KVCacheManager:
             )
         )
 
-        if self.log_stats:
+        if self.log_stats and request.is_prefetch_req:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.record(
                 num_tokens=request.num_tokens,

@@ -285,6 +285,15 @@ class EngineCoreOutputs(
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
 
+    def have_manage_outputs(self):
+        """check whether EngineCoreOutputs have manage request output """
+        have_manage_outputs = False
+        for output in self.outputs:
+            if output.agent_hint_response:
+                have_manage_outputs = True
+                break
+        return have_manage_outputs
+
 
 class EngineCoreRequestType(enum.Enum):
     """
