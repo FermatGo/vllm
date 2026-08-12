@@ -10,6 +10,7 @@ from vllm.v1.core.session_aware_manager import SessionAwareManager
 from vllm.v1.core.session_event_listener import SessionEventListener
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.request import Request
+from vllm.v1.engine import AgentHintParams
 from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
@@ -322,7 +323,7 @@ class SessionAwarePoolingManager(SessionEventListener):
         for i in range(0, len(self.prefetch_running_queue)):
             free_prefetch_running_req = self.prefetch_running_queue[i]
             logger.info(
-                f"free prefetch request {free_prefetch_running_req.request_id} and session id {free_prefetch_running_req.session_id}")
+                f"free prefetch request {free_prefetch_running_req.request_id} and session id {free_prefetch_running_req.agent_hint.session_id}")
             self.sam.kv_cache_manager.free(free_prefetch_running_req)
         self.prefetch_running_queue = []
 
@@ -339,7 +340,7 @@ class SessionAwarePoolingManager(SessionEventListener):
                 local_computed_block_num = 0
 
                 local_hit_req = Request(request_id=tmp_prefetch_req.request_id,
-                                        session_id=tmp_prefetch_req.session_id,
+                                        agent_hint=AgentHintParams(session_id=tmp_prefetch_req.session_id),
                                         prompt_token_ids=[0] * (tmp_prefetch_req.token_len + 1),
                                         sampling_params=SamplingParams.from_optional(),
                                         pooling_params=None,
@@ -377,7 +378,7 @@ class SessionAwarePoolingManager(SessionEventListener):
                 if total_external_matched_tokens + local_computed_tokens > 0:
                     # HBM/远端有命中，尝试分配KV
                     tmp_req = Request(request_id=tmp_prefetch_req.request_id,
-                                      session_id=tmp_prefetch_req.session_id,
+                                      agent_hint=AgentHintParams(session_id=tmp_prefetch_req.session_id),
                                       prompt_token_ids=[0] * (total_external_matched_tokens + local_computed_tokens),
                                       sampling_params=SamplingParams.from_optional(),
                                       pooling_params=None,
