@@ -350,9 +350,43 @@ class FreeKVCacheBlockQueue:
             return []
         assert self.num_free_blocks >= n
 
-        ret = [self.popleft(check_ttl=True)]
-        for _ in range(1, n):
-            ret.append(self.popleft(check_ttl=False))
+        only_zone_a = (
+            self.zone2_end is None
+            and self.zone1_end is not None
+            and self.zone1_end is self.fake_free_list_tail.prev_free_block
+        )
+
+        if not only_zone_a:
+            ret = [self.popleft(check_ttl=True)]
+            for _ in range(1, n):
+                ret.append(self.popleft(check_ttl=False))
+            return ret
+
+        # only zone A，no need to check_ttl。
+        self.num_free_blocks -= n
+
+        curr_block = self.fake_free_list_head.next_free_block
+        # Pop n blocks from the head of the list
+        ret = []
+
+        for _ in range(n):
+            assert curr_block is not None
+            ret.append(curr_block)
+            last_block = curr_block
+            curr_block = curr_block.next_free_block
+            # Reset prev_free_block and next_free_block of all popped blocks
+            last_block.prev_free_block = None
+            last_block.next_free_block = None
+
+        if curr_block is not None:
+            # The queue is not empty, connect the fake head to
+            # the new first block.
+            self.fake_free_list_head.next_free_block = curr_block
+            curr_block.prev_free_block = self.fake_free_list_head
+
+        if self.num_free_blocks == 0:
+            self.zone1_end = None
+
         return ret
 
     def remove(self, block: KVCacheBlock) -> None:
@@ -508,9 +542,34 @@ class FreeKVCacheBlockQueue:
         assert last_block is not None, (
             "prev_free_block of fake_free_list_tail should always exist"
         )
+
+        only_zone_a_or_empty = (
+            self.num_free_blocks == 0 or self.zone1_end is last_block
+        )
+
+        blocks_only_zone_a = all(
+            not block.is_ephemeral and block.num_session_refs == 0
+            for block in blocks
+        )
+
+        if not only_zone_a_or_empty or not blocks_only_zone_a:
+            for block in blocks:
+                self.append(block)
+            return
+        
         # Add inter-connections between consecutive blocks
         for block in blocks:
-            self.append(block)
+            block.prev_free_block = last_block
+            last_block.next_free_block = block
+            last_block = block
+
+        # Connect the last block of <blocks> to the fake tail
+        last_block.next_free_block = self.fake_free_list_tail
+        self.fake_free_list_tail.prev_free_block = last_block
+
+        self.num_free_blocks += len(blocks)
+
+        self.zone1_end = last_block
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
@@ -739,195 +798,6 @@ class FreeKVCacheBlockQueue:
             # A区：无保护、无引用，优先分配
             self.promote_to_zone_a(block)
 
-    def is_zone_b_sorted(self) -> bool:
-        """Check whether zone B is sorted by session refs ascending."""
-        if self.zone2_end is None:
-            logger.debug(
-                "is_zone_b_sorted: Zone B is empty; considered sorted."
-            )
-            return True
-
-        zone_b_prev = self.zone1_end or self.fake_free_list_head
-        curr_block = zone_b_prev.next_free_block
-
-        previous_block: KVCacheBlock | None = None
-        first_block: KVCacheBlock | None = None
-        block_count = 0
-
-        while True:
-            if curr_block is None:
-                logger.error(
-                    "is_zone_b_sorted: Invalid free-list structure: "
-                    "encountered None before reaching zone2_end. "
-                    "zone2_end=%s.",
-                    self.zone2_end.block_id,
-                )
-                return False
-
-            if curr_block is self.fake_free_list_tail:
-                logger.error(
-                    "is_zone_b_sorted: Reached fake tail before zone2_end. "
-                    "zone2_end=%s is not reachable from the start of zone B.",
-                    self.zone2_end.block_id,
-                )
-                return False
-
-            if first_block is None:
-                first_block = curr_block
-
-            block_count += 1
-
-            if curr_block.num_session_refs <= 0:
-                logger.error(
-                    "is_zone_b_sorted: Block %s is in zone B but has "
-                    "invalid session refs=%s.",
-                    curr_block.block_id,
-                    curr_block.num_session_refs,
-                )
-                return False
-
-            if curr_block.is_ephemeral:
-                logger.error(
-                    "is_zone_b_sorted: Block %s is in zone B but is "
-                    "still TTL-protected. ttl_expire_at=%s.",
-                    curr_block.block_id,
-                    curr_block._ttl_expire_at,
-                )
-                return False
-
-            if (
-                previous_block is not None
-                and previous_block.num_session_refs
-                > curr_block.num_session_refs
-            ):
-                logger.warning(
-                    "is_zone_b_sorted: Zone B is not sorted. "
-                    "Previous block id=%s, session_refs=%s; "
-                    "current block id=%s, session_refs=%s.",
-                    previous_block.block_id,
-                    previous_block.num_session_refs,
-                    curr_block.block_id,
-                    curr_block.num_session_refs,
-                )
-                return False
-
-            if curr_block is self.zone2_end:
-                logger.debug(
-                    "is_zone_b_sorted: Zone B is sorted. "
-                    "block_count=%s, first_block=%s, first_refs=%s, "
-                    "last_block=%s, last_refs=%s.",
-                    block_count,
-                    first_block.block_id,
-                    first_block.num_session_refs,
-                    curr_block.block_id,
-                    curr_block.num_session_refs,
-                )
-                return True
-
-            previous_block = curr_block
-            curr_block = curr_block.next_free_block
-
-            if block_count > self.num_free_blocks:
-                logger.error(
-                    "is_zone_b_sorted: Traversed more blocks than "
-                    "num_free_blocks. Possible linked-list cycle. "
-                    "block_count=%s, num_free_blocks=%s.",
-                    block_count,
-                    self.num_free_blocks,
-                )
-                return False
-    
-    def is_zone_c_sorted(self) -> bool:
-        """Check whether zone C is sorted by TTL expiration ascending."""
-        zone_c_prev = (
-            self.zone2_end
-            or self.zone1_end
-            or self.fake_free_list_head
-        )
-        curr_block = zone_c_prev.next_free_block
-
-        if curr_block is None:
-            logger.error(
-                "is_zone_c_sorted: Invalid free-list structure: "
-                "the block before zone C has no next block."
-            )
-            return False
-
-        if curr_block is self.fake_free_list_tail:
-            logger.debug(
-                "is_zone_c_sorted: Zone C is empty; considered sorted."
-            )
-            return True
-
-        previous_block: KVCacheBlock | None = None
-        first_block: KVCacheBlock | None = None
-        block_count = 0
-
-        while curr_block is not self.fake_free_list_tail:
-            if curr_block is None:
-                logger.error(
-                    "is_zone_c_sorted: Invalid free-list structure: "
-                    "encountered None before reaching fake tail."
-                )
-                return False
-
-            if first_block is None:
-                first_block = curr_block
-
-            block_count += 1
-
-            if curr_block._ttl_expire_at <= 0:
-                logger.error(
-                    "is_zone_c_sorted: Block %s is in zone C but has "
-                    "invalid ttl_expire_at=%s.",
-                    curr_block.block_id,
-                    curr_block._ttl_expire_at,
-                )
-                return False
-
-            if (
-                previous_block is not None
-                and previous_block._ttl_expire_at
-                > curr_block._ttl_expire_at
-            ):
-                logger.warning(
-                    "is_zone_c_sorted: Zone C is not sorted. "
-                    "Previous block id=%s, ttl_expire_at=%s; "
-                    "current block id=%s, ttl_expire_at=%s.",
-                    previous_block.block_id,
-                    previous_block._ttl_expire_at,
-                    curr_block.block_id,
-                    curr_block._ttl_expire_at,
-                )
-                return False
-
-            previous_block = curr_block
-            curr_block = curr_block.next_free_block
-
-            if block_count > self.num_free_blocks:
-                logger.error(
-                    "is_zone_c_sorted: Traversed more blocks than "
-                    "num_free_blocks. Possible linked-list cycle. "
-                    "block_count=%s, num_free_blocks=%s.",
-                    block_count,
-                    self.num_free_blocks,
-                )
-                return False
-
-        assert first_block is not None
-        assert previous_block is not None
-
-        logger.debug(
-            "is_zone_c_sorted: Zone C is sorted. "
-            "block_count=%s, first_block=%s, first_ttl_expire_at=%s, "
-            "last_block=%s, last_ttl_expire_at=%s.",
-            block_count,
-            first_block.block_id,
-            first_block._ttl_expire_at,
-            previous_block.block_id,
-            previous_block._ttl_expire_at,
-        )
-        return True
 
 def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.

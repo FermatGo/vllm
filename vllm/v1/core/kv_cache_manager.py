@@ -442,45 +442,9 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        
-        # cache_blocks() 会原地设置新完成 block 的 block_hash。
-        blocks_for_current_request = self.coordinator.get_blocks(request.request_id)
 
-        cached_blocks_len_before = tuple(
-            sum(
-                1
-                for block in group
-                if not block.is_null
-                and block.block_hash is not None
-            )
-            for group in blocks_for_current_request
-        )
-
-        uncached_block_ids_before = tuple(
-            {
-                block.block_id
-                for block in group
-                if not block.is_null and block.block_hash is None
-            }
-            for group in blocks_for_current_request
-        )
-
-        self.coordinator.cache_blocks(request, num_tokens_to_cache)
-
-        newly_cached_blocks = tuple(
-            [
-                block
-                for block in group
-                if (
-                    not block.is_null
-                    and block.block_id in uncached_ids
-                    and block.block_hash is not None
-                )
-            ]
-            for group, uncached_ids in zip(
-                blocks_for_current_request,
-                uncached_block_ids_before,
-            )
+        newly_cached_blocks, cached_blocks_len_before = (
+            self.coordinator.cache_blocks(request, num_tokens_to_cache)
         )
 
         if (
@@ -489,9 +453,7 @@ class KVCacheManager:
         ):
             self._on_blocks_allocated(
                 request,
-                self.create_kv_cache_blocks(
-                    newly_cached_blocks
-                ),
+                self.create_kv_cache_blocks(newly_cached_blocks),
                 cached_blocks_len_before,
             )
 
@@ -639,7 +601,7 @@ class KVCacheManager:
         if block.ref_cnt == 0 and not block.is_null:
             self.block_pool.free_block_queue.on_block_meta_changed(block)
     
-    def set_session_event_callbacks(
+    def register_session_event_callbacks(
         self,
         on_blocks_allocated=None,
         on_block_cache_hit=None,

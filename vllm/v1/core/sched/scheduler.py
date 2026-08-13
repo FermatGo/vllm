@@ -315,7 +315,7 @@ class Scheduler(SchedulerInterface):
             self.session_pooling_manager.start()
             logger.info(f"Init session pooling manager self.block_size {self.block_size} hash_block_size {hash_block_size}")
 
-        self.kv_cache_manager.set_session_event_callbacks(
+        self.kv_cache_manager.register_session_event_callbacks(
             on_blocks_allocated=self.session_aware_manager.on_blocks_allocated_for_request,
             on_block_cache_hit=self.session_aware_manager.on_block_cache_hit_for_request,
         )
@@ -438,7 +438,9 @@ class Scheduler(SchedulerInterface):
 
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            self.session_aware_manager._session_block_hash[request.agent_hint.session_id if request.agent_hint else None] = request.block_hashes
+
+            if request.agent_hint and request.agent_hint.session_id:
+                self.session_aware_manager.register_session_block_hash(request.agent_hint.session_id, request.block_hashes)
 
             if (
                 request.num_output_placeholders > 0
@@ -628,7 +630,10 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-                self.session_aware_manager._session_block_hash[request.agent_hint.session_id if request.agent_hint else None] = request.block_hashes
+
+                if request.agent_hint and request.agent_hint.session_id:
+                    self.session_aware_manager.register_session_block_hash(request.agent_hint.session_id, request.block_hashes)
+
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status

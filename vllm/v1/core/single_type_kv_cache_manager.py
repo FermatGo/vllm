@@ -274,7 +274,9 @@ class SingleTypeKVCacheManager(ABC):
         self.new_block_ids = []
         return ids
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self, request: Request, num_tokens: int
+    ) -> tuple[list[KVCacheBlock], int]:
         """
         Cache the blocks for the request.
 
@@ -287,7 +289,7 @@ class SingleTypeKVCacheManager(ABC):
         num_full_blocks = num_tokens // self.block_size
 
         if num_cached_blocks >= num_full_blocks:
-            return
+            return [], num_cached_blocks
 
         self.block_pool.cache_full_blocks(
             request=request,
@@ -299,6 +301,8 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+        newly_cached_blocks = self.req_to_blocks[request.request_id][num_cached_blocks:num_full_blocks]
+        return newly_cached_blocks, num_cached_blocks
 
     def free(self, request_id: str) -> None:
         """
