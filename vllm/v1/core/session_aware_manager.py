@@ -767,6 +767,11 @@ class SessionAwareManager:
                 )
         return ret
 
+    def register_agent_hint(self, request_id: str, session_id: str | None,
+                            context_management: "ContextManagementParams | None",) -> list[Any] | None:
+        """register context management to session controller"""
+        logger.info(f"register context management with req id {request_id} session id {session_id}")
+        return self._session_controller.process_request_edits(request_id, session_id, context_management)
 
 @dataclass
 class TTLBlockEntry:

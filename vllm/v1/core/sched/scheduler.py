@@ -371,14 +371,26 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
-    def register_request_context_management_edits(
+    def register_context_management_request(
         self,
         request_id: str,
         session_id: str | None,
         context_management: "ContextManagementParams | None",
     ) -> list[Any] | None:
-        logger.info(f"register context management with req id {request_id} session id {session_id}")
-        return self.session_aware_manager._session_controller.process_request_edits(request_id, session_id, context_management)
+        """Register a new request with its session context (cache/prompt hints).
+        Args:
+            request_id: Unique ID of the incoming request.
+            session_id: Session this request belongs to, or ``None``
+                for stateless (non-session) requests.
+            context_management: Parsed ``context_management`` dict from
+                the request's ``agent_hint`` payload, or ``None`` when
+                the request carries no session context.
+
+        Returns:
+            Return value of ``register_agent_hint``, typically ``None``
+            or a list of opaque cache metadata for the caller.
+        """
+        return self.session_aware_manager.register_agent_hint(request_id, session_id, context_management)
 
     def has_prefetch_req(self):
         return len(self.session_pooling_manager.prefetch_waiting_queue) > 0 if self.session_pooling_manager else False
@@ -1800,6 +1812,10 @@ class Scheduler(SchedulerInterface):
             self.requests[request.request_id] = request
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+            if self.session_aware_manager:
+                self.session_aware_manager.register_agent_hint(request.request_id,
+                    request.agent_hint.session_id if request.agent_hint else None,
+                    request.agent_hint.context_management if request.agent_hint else None)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
