@@ -43,19 +43,10 @@ class PrefetchRequest:
 
 class SessionKeyTracker:
     """跟踪每个 session 写入远端存储的 PoolKey"""
-    _instance_lock = threading.Lock()
 
     def __init__(self):
-        pass
-
-    def __new__(cls):
-        if not hasattr(SessionKeyTracker, "_instance"):
-            with SessionKeyTracker._instance_lock:
-                if not hasattr(SessionKeyTracker, "_instance"):
-                    SessionKeyTracker._instance = object.__new__(cls)
-                    SessionKeyTracker._instance._session_hashes: dict[str, list[BlockHash]] = {}
-                    SessionKeyTracker._instance._lock = threading.Lock()
-        return SessionKeyTracker._instance
+        self._session_hashes: dict[str, list[BlockHash]] = {}
+        self._lock = threading.Lock()
 
     def get_dicts(self) -> dict[str, list[BlockHash]]:
         with self._lock:
@@ -103,14 +94,12 @@ class KVCacheKeepAliveThread(threading.Thread):
         connector: KVConnectorBase_V1,
         session_key_tracker: SessionKeyTracker,
         interval: int = 60,           # 刷新间隔（秒）
-        max_keys_per_cycle: int = 0,  # 每轮最多刷新的 key 数（0=不限）
         block_size: int = 0,
     ):
         super().__init__(daemon=True, name="KVCacheKeepAliveThread")
         self.connector = connector
         self.tracker = session_key_tracker
         self.interval = interval
-        self.max_keys = max_keys_per_cycle
         self._stopped = threading.Event()
         self.block_size = block_size
 
@@ -183,7 +172,6 @@ class SessionAwarePoolingManager(SessionEventListener):
                 connector=self.connector,
                 session_key_tracker=self.key_tracker,
                 interval=self.config.keep_alive_interval,
-                max_keys_per_cycle=self.config.max_keys_per_cycle,
                 block_size=self.block_size,
             )
             self.keep_alive_thread.start()
