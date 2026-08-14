@@ -516,7 +516,7 @@ class SessionAwareManager:
 
         block_hashes_all.extend(self._free_session(session_id))
 
-        logger.info(
+        logger.debug(
             f"Free session tree for session {session_id}: "
             f"current session_to_blocks: {self._session_blocks}, "
             f"session_info: {self._sessions}, "
