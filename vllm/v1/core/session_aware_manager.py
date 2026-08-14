@@ -12,7 +12,8 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager, KVCacheBlocks
 from vllm.v1.core.session_event_listener import SessionEventListener
 from vllm.v1.engine import ContextManagementEditsParams, ContextManagementParams
 from vllm.v1.core.kv_cache_utils import (
-    KVCacheBlock, BlockHash, BlockHashListWithBlockSize, get_block_hash
+    KVCacheBlock, BlockHash, BlockHashWithGroupId,
+    BlockHashListWithBlockSize, get_block_hash
 )
 
 
@@ -20,17 +21,17 @@ logger = init_logger(__name__)
 
 
 def split_base_block_hashes(
-    block: KVCacheBlock,
+    block_hash: BlockHashWithGroupId,
     block_size: int,
     hash_block_size: int,
 ) -> list[BlockHash]:
     """split KVCacheBlock block hash to request block hash"""
-    assert block.block_hash is not None
+    assert block_hash is not None
     assert block_size % hash_block_size == 0
 
     # block.block_hash 是 BlockHashWithGroupId：
     # [拼接后的 BlockHash][4 字节 group_id]
-    merged_hash = get_block_hash(block.block_hash)
+    merged_hash = get_block_hash(block_hash)
 
     num_base_hashes = block_size // hash_block_size
     assert len(merged_hash) % num_base_hashes == 0
@@ -51,6 +52,7 @@ class SessionBlockRecord:
     is_ephemeral: bool = False          # 是否受 cache_control ephemeral 保护
     ttl_expire_at: float = 0.0         # ephemeral block 的 TTL 过期时间，0 表示无限制
     created_at: float = 0.0                  # 记录创建时间
+    block_hash: BlockHashWithGroupId | None = None  # 记录创建时的 block hash，便于调试
 
 
 @dataclass
@@ -146,7 +148,7 @@ class SessionAwareManager:
                     f'session_id = {request.agent_hint.session_id if request.agent_hint else None}, '
                     f'block_ids = {blocks.get_block_ids()}, request.num_output_tokens: {request.num_output_tokens}')
 
-        self.on_blocks_allocated(
+        self._on_blocks_allocated(
             session_id=request.agent_hint.session_id,
             parent_session_id=request.agent_hint.parent_session_id,
             blocks=blocks,
@@ -168,14 +170,14 @@ class SessionAwareManager:
                     f'session_id = {request.agent_hint.session_id if request.agent_hint else None}, '
                     f'block_ids = {blocks.get_block_ids()}')
 
-        self.on_blocks_cache_hit(
+        self._on_blocks_cache_hit(
             session_id=request.agent_hint.session_id,
             parent_session_id=request.agent_hint.parent_session_id,
             blocks=blocks,
             ephemeral_range=compute_ephemeral_range(request.agent_hint.cache_control)
         )
 
-    def on_blocks_allocated(
+    def _on_blocks_allocated(
         self,
         session_id: str | None,
         parent_session_id: str | None,
@@ -218,7 +220,7 @@ class SessionAwareManager:
                 # allocate_slots理论上只传 newly-cached blocks，保留检查用于防御异常情况。
                 if block.block_hash is None:
                     logger.warning("Newly cached block %s has no block hash", block_id)
-                    break
+                    continue
 
                 # SessionBlockRecord所需参数计算
                 is_ephemeral = (
@@ -241,12 +243,13 @@ class SessionAwareManager:
                     is_ephemeral=is_ephemeral,
                     ttl_expire_at=ttl_expire_at,
                     created_at=now,
+                    block_hash=block.block_hash
                 )
                 self._add_session_block_ref(record, group_id)
 
                 if is_ephemeral:
                     newly_protected_hashes.append(
-                        (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
+                        (block_id, split_base_block_hashes(block.block_hash, self.block_size[group_id], self.hash_block_size)))
                     newly_protected_ttl = ttl_expire_at
 
                 # get_new_blocks，已经把物理 block 的 session_ref_cnt 清零。
@@ -272,7 +275,7 @@ class SessionAwareManager:
         self._ttl_manager.register(block_infos=newly_protected_hashes, session_id=session_id,
                                    expire_at=newly_protected_ttl, protected_block_hashes=protected_block_hashes)
 
-    def on_blocks_cache_hit(
+    def _on_blocks_cache_hit(
         self,
         session_id: str | None,
         parent_session_id: str | None,
@@ -330,7 +333,7 @@ class SessionAwareManager:
 
                         # self._ttl_manager.update(block_id, session_id, new_expire_at)
                         newly_protected_hashes.append(
-                            (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
+                            (block_id, split_base_block_hashes(block.block_hash, self.block_size[group_id], self.hash_block_size)))
                         newly_protected_ttl = new_expire_at
 
                         # 一个 block 可能被多个 session 引用，block metadata 应使用
@@ -351,12 +354,13 @@ class SessionAwareManager:
                         is_ephemeral=is_ephemeral,
                         ttl_expire_at=requested_expire_at,
                         created_at=now,
+                        block_hash=block.block_hash
                     )
                     self._add_session_block_ref(record, group_id)
 
                     if is_ephemeral:
                         newly_protected_hashes.append(
-                            (block_id, split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size)))
+                            (block_id, split_base_block_hashes(block.block_hash, self.block_size[group_id], self.hash_block_size)))
                         newly_protected_ttl = requested_expire_at
 
                         block_expire_at = max(
@@ -457,7 +461,7 @@ class SessionAwareManager:
             if not self._block_sessions[group_id][block_id]:
                 del self._block_sessions[group_id][block_id]
 
-    def free_session(self, session_id: str) -> list:
+    def _free_session(self, session_id: str) -> list:
         """清理指定 session 的所有 block 引用"""
         block_hashes = []
 
@@ -500,7 +504,7 @@ class SessionAwareManager:
 
         return block_hashes
 
-    def free_session_tree(self, session_id: str) -> list:
+    def _free_session_tree(self, session_id: str) -> list:
         """递归清理session及其所有子session"""
         session_info = self._sessions.get(session_id)
         if session_info is None:
@@ -508,9 +512,9 @@ class SessionAwareManager:
 
         block_hashes_all = []
         for child_sid in list(self._sessions[session_id].children):
-            block_hashes_all.extend(self.free_session_tree(child_sid))
+            block_hashes_all.extend(self._free_session_tree(child_sid))
 
-        block_hashes_all.extend(self.free_session(session_id))
+        block_hashes_all.extend(self._free_session(session_id))
 
         logger.info(
             f"Free session tree for session {session_id}: "
@@ -539,9 +543,8 @@ class SessionAwareManager:
                 if record.is_ephemeral:
                     self._ttl_manager.remove(block_id=block_id, session_id=session_id, is_notify_spm=False)
 
-                    block = self.kv_cache_manager.block_pool.blocks[block_id]
                     affected_block_hashes.extend(
-                        split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
+                        split_base_block_hashes(record.block_hash, self.block_size[group_id], self.hash_block_size))
 
                 self._remove_session_block_ref(session_id, block_id, group_id)
 
@@ -599,12 +602,8 @@ class SessionAwareManager:
                     if len(cur_block_session) == 0 or record is None:
                         continue
 
-                    # if record.is_ephemeral:
-                    #     self._ttl_manager.remove(block_id, session_id)
-
-                    block = self.kv_cache_manager.block_pool.blocks[block_id]
                     affected_block_hashes.extend(
-                        split_base_block_hashes(block, self.block_size[group_id], self.hash_block_size))
+                        split_base_block_hashes(record.block_hash, self.block_size[group_id], self.hash_block_size))
 
                     self._remove_session_block_ref(session_id, block_id, group_id)
                     
@@ -623,7 +622,7 @@ class SessionAwareManager:
                     )
 
         else:
-            affected_block_hashes = self.free_session_tree(session_id)
+            affected_block_hashes = self._free_session_tree(session_id)
 
         self._ttl_manager.remove(block_id=-1, session_id=session_id)
         res = len(affected_block_hashes)
@@ -704,8 +703,7 @@ class SessionAwareManager:
             hash_block: dict[BlockHash, int] = {}
 
             for block_id in session_blocks:
-                block = self.kv_cache_manager.block_pool.blocks[block_id]
-                block_hash_with_group_id = block.block_hash
+                block_hash_with_group_id = session_blocks[block_id].block_hash
 
                 # 未填满或尚未进入 prefix cache 的 block 可能没有 hash。
                 if block_hash_with_group_id is None:
@@ -767,6 +765,15 @@ class SessionAwareManager:
                 )
         return ret
 
+    def register_agent_hint(self, request_id: str, session_id: str | None,
+                            context_management: "ContextManagementParams | None",) -> list[Any] | None:
+        """register context management to session controller"""
+        logger.info(f"register context management with req id {request_id} session id {session_id}")
+        return self._session_controller.process_request_edits(request_id, session_id, context_management)
+
+    def register_session_block_hash(self, session_id: str, block_hashes: list[BlockHash]) -> None:
+        """register session block hash to session aware manager"""
+        self._session_block_hash[session_id] = block_hashes
 
 @dataclass
 class TTLBlockEntry:

@@ -343,9 +343,6 @@ class EngineCore:
                 "Got kv_transfer_params, but no KVConnector found. "
                 "Disabling KVTransfer for this request."
             )
-        self.scheduler.register_request_context_management_edits(request.request_id,
-                                                                 request.agent_hint.session_id if request.agent_hint else None,
-                                                                 request.agent_hint.context_management if request.agent_hint else None)
         self.scheduler.add_request(request)
         logger.info(f"add request, request_id = {request.request_id}, num_prompt_tokens = {request.num_prompt_tokens}")
 
@@ -1188,7 +1185,7 @@ class EngineCoreProc(EngineCore):
     def _process_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any):
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            edits_results = self.scheduler.register_request_context_management_edits(
+            edits_results = self.scheduler.register_context_management_request(
                 req.request_id,
                 req.agent_hint.session_id if req.agent_hint else None,
                 req.agent_hint.context_management if req.agent_hint else None)

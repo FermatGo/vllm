@@ -195,7 +195,10 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(
+        self, request: Request, 
+        num_computed_tokens: int
+    ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         """
         Cache the blocks for the request.
 
@@ -205,8 +208,15 @@ class KVCacheCoordinator(ABC):
                 that need to be cached
                 (including tokens that are already cached).
         """
-        for manager in self.single_type_managers:
+        results = [
             manager.cache_blocks(request, num_computed_tokens)
+            for manager in self.single_type_managers
+        ]
+
+        newly_cached_blocks = tuple(result[0] for result in results)
+        cached_blocks_start = tuple(result[1] for result in results)
+
+        return newly_cached_blocks, cached_blocks_start
 
     def free(self, request_id: str) -> None:
         """

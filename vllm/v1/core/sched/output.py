@@ -38,7 +38,6 @@ class NewRequestData:
     num_computed_tokens: int
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
-    session_id: str | None = None
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
@@ -60,8 +59,7 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
-            prefill_token_ids=prefill_token_ids,
-            session_id=request.agent_hint.session_id if request.agent_hint else None
+            prefill_token_ids=prefill_token_ids
         )
 
     def __repr__(self) -> str:

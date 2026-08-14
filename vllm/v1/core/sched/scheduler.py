@@ -315,7 +315,7 @@ class Scheduler(SchedulerInterface):
             self.session_pooling_manager.start()
             logger.info(f"Init session pooling manager self.block_size {self.block_size} hash_block_size {hash_block_size}")
 
-        self.kv_cache_manager.set_session_event_callbacks(
+        self.kv_cache_manager.register_session_event_callbacks(
             on_blocks_allocated=self.session_aware_manager.on_blocks_allocated_for_request,
             on_block_cache_hit=self.session_aware_manager.on_block_cache_hit_for_request,
         )
@@ -371,14 +371,26 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
-    def register_request_context_management_edits(
+    def register_context_management_request(
         self,
         request_id: str,
         session_id: str | None,
         context_management: "ContextManagementParams | None",
     ) -> list[Any] | None:
-        logger.info(f"register context management with req id {request_id} session id {session_id}")
-        return self.session_aware_manager._session_controller.process_request_edits(request_id, session_id, context_management)
+        """Register a new request with its session context (cache/prompt hints).
+        Args:
+            request_id: Unique ID of the incoming request.
+            session_id: Session this request belongs to, or ``None``
+                for stateless (non-session) requests.
+            context_management: Parsed ``context_management`` dict from
+                the request's ``agent_hint`` payload, or ``None`` when
+                the request carries no session context.
+
+        Returns:
+            Return value of ``register_agent_hint``, typically ``None``
+            or a list of opaque cache metadata for the caller.
+        """
+        return self.session_aware_manager.register_agent_hint(request_id, session_id, context_management)
 
     def has_prefetch_req(self):
         return len(self.session_pooling_manager.prefetch_waiting_queue) > 0 if self.session_pooling_manager else False
@@ -426,7 +438,9 @@ class Scheduler(SchedulerInterface):
 
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            self.session_aware_manager._session_block_hash[request.agent_hint.session_id if request.agent_hint else None] = request.block_hashes
+
+            if request.agent_hint and request.agent_hint.session_id:
+                self.session_aware_manager.register_session_block_hash(request.agent_hint.session_id, request.block_hashes)
 
             if (
                 request.num_output_placeholders > 0
@@ -616,7 +630,10 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-                self.session_aware_manager._session_block_hash[request.agent_hint.session_id if request.agent_hint else None] = request.block_hashes
+
+                if request.agent_hint and request.agent_hint.session_id:
+                    self.session_aware_manager.register_session_block_hash(request.agent_hint.session_id, request.block_hashes)
+
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
@@ -1800,6 +1817,10 @@ class Scheduler(SchedulerInterface):
             self.requests[request.request_id] = request
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+            if self.session_aware_manager:
+                self.session_aware_manager.register_agent_hint(request.request_id,
+                    request.agent_hint.session_id if request.agent_hint else None,
+                    request.agent_hint.context_management if request.agent_hint else None)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus

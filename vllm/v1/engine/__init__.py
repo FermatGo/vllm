@@ -285,7 +285,7 @@ class EngineCoreOutputs(
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
 
-    def have_manage_outputs(self):
+    def have_agent_hint_outputs(self):
         """check whether EngineCoreOutputs have manage request output """
         have_manage_outputs = False
         for output in self.outputs:
