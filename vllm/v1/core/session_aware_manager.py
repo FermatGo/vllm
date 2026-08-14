@@ -465,10 +465,10 @@ class SessionAwareManager:
         """清理指定 session 的所有 block 引用"""
         block_hashes = []
 
-        for group_id in range(self.num_kv_cache_groups):
+        for group_id in range(self.num_kv_cache_groups-1, -1, -1):
             block_ids = []
             if session_id in self._session_blocks[group_id]:
-                for block_id in list(self._session_blocks[group_id][session_id].keys()):
+                for block_id in list(self._session_blocks[group_id][session_id].keys())[::-1]:
 
                     cur_block_session = self._block_sessions[group_id].get(block_id, {})
                     record = cur_block_session.get(session_id)
@@ -528,13 +528,13 @@ class SessionAwareManager:
         """卸载指定范围的 block — 减少 session 引用 + 清除当前session的TTL（通知TTLManager）"""
         affected_block_hashes: list[BlockHash] = []
 
-        for group_id in range(self.num_kv_cache_groups):
+        for group_id in range(self.num_kv_cache_groups-1, -1, -1):
             assert self.block_size[group_id] % self.hash_block_size == 0, (
                 f"block_size {self.block_size[group_id]} is not a multiple of {self.hash_block_size}")
 
             block_ids = block_ids_all_group[group_id]
 
-            for block_id in block_ids:
+            for block_id in block_ids[::-1]:
                 cur_block_session = self._block_sessions[group_id].get(block_id, {})
                 record = cur_block_session.get(session_id)
                 if len(cur_block_session) == 0 or record is None:
@@ -546,7 +546,7 @@ class SessionAwareManager:
                     affected_block_hashes.extend(
                         split_base_block_hashes(record.block_hash, self.block_size[group_id], self.hash_block_size))
 
-                self._remove_session_block_ref(session_id, block_id, group_id)
+                # self._remove_session_block_ref(session_id, block_id, group_id)
 
                 remaining_records = self._block_sessions[group_id].get(block_id, {}).values()
                 latest_ttl_expire_at = max(
@@ -558,7 +558,7 @@ class SessionAwareManager:
                 )
                 self.kv_cache_manager.update_block_meta(
                     block_id,
-                    delta_ref=-1,
+                    delta_ref=0,
                     ttl_expire_at=latest_ttl_expire_at,
                 )
 
@@ -590,13 +590,13 @@ class SessionAwareManager:
         if not is_session:
             affected_block_hashes: list[BlockHash] = []
 
-            for group_id in range(self.num_kv_cache_groups):
+            for group_id in range(self.num_kv_cache_groups-1, -1, -1):
                 assert self.block_size[group_id] % self.hash_block_size == 0, (
                     f"block_size {self.block_size[group_id]} is not a multiple of {self.hash_block_size}")
 
                 block_ids = block_ids_all_group[group_id]
 
-                for block_id in block_ids:
+                for block_id in block_ids[::-1]:
                     cur_block_session = self._block_sessions[group_id].get(block_id, {})
                     record = cur_block_session.get(session_id)
                     if len(cur_block_session) == 0 or record is None:
