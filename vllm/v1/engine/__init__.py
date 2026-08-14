@@ -192,20 +192,11 @@ class EngineCoreEvent(msgspec.Struct):
         timestamp = time.monotonic() if timestamp is None else timestamp
         return cls(event_type, timestamp)
 
-# Response:
-# {
-#     "session_id": "sub-1",
-#     "freed_blocks": 12,
-#     "orphaned_blocks": 8,
-#     "children_freed": [
-#         {"session_id": "sub-1-child", "freed_blocks": 5, "orphaned_blocks": 3}
-#     ]
-# }
+
 @dataclass
 class AgentHintResponse:
     session_id: str | None
     edit_results: list[Any] | None = None
-
 
 
 class EngineCoreOutput(
