@@ -63,7 +63,7 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
     UtilityResult,
-    AgentHintSessionManagementResponse
+    AgentHintResponse
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
@@ -1195,7 +1195,7 @@ class EngineCoreProc(EngineCore):
 
             list = [
                 EngineCoreOutput(req.request_id, [1], finish_reason=FinishReason.LENGTH,
-                                 agent_hint_response=AgentHintSessionManagementResponse(
+                                 agent_hint_response=AgentHintResponse(
                                      session_id=req.agent_hint.session_id if req.agent_hint else None,
                                      edit_results=edits_results
                                  ))

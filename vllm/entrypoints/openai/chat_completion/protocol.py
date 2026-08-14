@@ -19,7 +19,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.v1.engine import AgentHintSessionManagementResponse
+from vllm.v1.engine import AgentHintResponse
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     DeltaMessage,
@@ -111,7 +111,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
-    agent_hint_session_management_response : AgentHintSessionManagementResponse | None = None
+    agent_hint_response : AgentHintResponse | None = None
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):

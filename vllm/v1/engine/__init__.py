@@ -202,7 +202,7 @@ class EngineCoreEvent(msgspec.Struct):
 #     ]
 # }
 @dataclass
-class AgentHintSessionManagementResponse:
+class AgentHintResponse:
     session_id: str | None
     edit_results: list[Any] | None = None
 
@@ -236,7 +236,7 @@ class EngineCoreOutput(
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
 
-    agent_hint_response: AgentHintSessionManagementResponse | None = None
+    agent_hint_response: AgentHintResponse | None = None
 
     @property
     def finished(self) -> bool:

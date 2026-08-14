@@ -377,7 +377,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
-            agentHintSessionManagementResponse=engineCoreOutput.agent_hint_response if engineCoreOutput else None
+            agent_hint_response=engineCoreOutput.agent_hint_response if engineCoreOutput else None
         )
 
     def _new_completion_output(
