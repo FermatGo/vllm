@@ -129,8 +129,7 @@ class SessionAwareManager:
                     block = self.kv_cache_manager.block_pool.blocks[block_id]
 
                     # block本身清理的session_ref_cnt和ttl_expire_at
-                    block._session_ref_cnt = 0
-                    block._ttl_expire_at = 0.0
+                    self.reset_block_state(block)
 
                     # 清理TTLManager中这个物理 block 的所有旧 session 引用
                     old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
@@ -204,8 +203,7 @@ class SessionAwareManager:
                 block = self.kv_cache_manager.block_pool.blocks[block_id]
 
                 # block本身清理的session_ref_cnt和ttl_expire_at
-                block._session_ref_cnt = 0
-                block._ttl_expire_at = 0.0
+                self.reset_block_state(block)
 
                 # 清理TTLManager中这个物理 block 的所有旧 session 引用
                 old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
@@ -224,11 +222,11 @@ class SessionAwareManager:
 
                 # SessionBlockRecord所需参数计算
                 is_ephemeral = (
-                        ephemeral_range is not None
-                        and ephemeral_range.ttl > 0
-                        and self.block_size[group_id] // self.hash_block_size * (
-                                    cached_blocks_len + ind) <= ephemeral_range.block_offset
-                        and is_prefill
+                    ephemeral_range is not None
+                    and ephemeral_range.ttl > 0
+                    and self.block_size[group_id] // self.hash_block_size * (
+                                cached_blocks_len + ind) <= ephemeral_range.block_offset
+                    and is_prefill
                 )
 
                 ttl_expire_at = (
@@ -560,6 +558,7 @@ class SessionAwareManager:
                     block_id,
                     delta_ref=0,
                     ttl_expire_at=latest_ttl_expire_at,
+                    is_offload_block=True,
                 )
 
         res = len(affected_block_hashes)
@@ -774,6 +773,13 @@ class SessionAwareManager:
     def register_session_block_hash(self, session_id: str, block_hashes: list[BlockHash]) -> None:
         """register session block hash to session aware manager"""
         self._session_block_hash[session_id] = block_hashes
+
+    def reset_block_state(self, block: KVCacheBlock) -> None:
+        """
+        Reset the session state of a block, clearing its session 
+        reference count and TTL expiration time.
+        """
+        block.reset_session_state()
 
 @dataclass
 class TTLBlockEntry:

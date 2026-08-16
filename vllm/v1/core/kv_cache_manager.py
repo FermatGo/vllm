@@ -589,6 +589,7 @@ class KVCacheManager:
         block_id: int,
         delta_ref: int = 0,
         ttl_expire_at: float | None = None,
+        is_offload_block: bool | None = None,
     ) -> None:
         """统一修改 block 的 metadata。
         SAM 的所有事件都转化为对此接口的调用。
@@ -598,6 +599,8 @@ class KVCacheManager:
             block._ttl_expire_at = ttl_expire_at
         if delta_ref != 0:
             block._session_ref_cnt = max(0, block._session_ref_cnt+delta_ref)
+        if is_offload_block is not None:
+            block._is_offload_block = is_offload_block
         if block.ref_cnt == 0 and not block.is_null:
             self.block_pool.free_block_queue.on_block_meta_changed(block)
     

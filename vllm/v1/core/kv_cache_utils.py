@@ -138,6 +138,8 @@ class KVCacheBlock:
 
     _ttl_expire_at: float = 0.0
 
+    _is_offload_block: bool = False
+
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
@@ -176,6 +178,20 @@ class KVCacheBlock:
         本地计算，不依赖外部状态，仅根据 _ttl_expire_at 判断。
         """
         return self._ttl_expire_at > 0 and time.monotonic() < self._ttl_expire_at
+
+    @property
+    def is_offload_block(self) -> bool:
+        """判断当前 block 是否是 offload block。
+        本地计算，不依赖外部状态，仅根据 _is_offload_block 判断。
+        """
+        return self._is_offload_block
+
+    @property
+    def reset_session_state(self) -> None:
+        """Reset the session reference count and ephemeral state of the block."""
+        self._session_ref_cnt = 0
+        self._ttl_expire_at = 0.0
+        self._is_offload_block = False
 
 
 class FreeKVCacheBlockQueue:
@@ -475,7 +491,7 @@ class FreeKVCacheBlockQueue:
                 prev_block = curr_block
                 curr_block = curr_block.next_free_block
 
-        elif block.num_session_refs > 0:
+        elif block.num_session_refs > 0 or block.is_offload_block:
             logger.debug("append: Appending block id %s to zone B.", block.block_id)
 
             # B 区按照 session 引用数量升序排列, 引用少的靠前，引用多的靠后
@@ -791,7 +807,7 @@ class FreeKVCacheBlockQueue:
         if block.is_ephemeral:
             # C区：ephemeral 保护中，不可分配
             self.promote_to_zone_c(block)
-        elif block._session_ref_cnt > 0:
+        elif block._session_ref_cnt > 0 or block.is_offload_block:
             # B区：无 ephemeral 保护但有 session 引用
             self.promote_to_zone_b(block)
         else:
