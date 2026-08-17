@@ -1344,7 +1344,10 @@ class SessionController:
                 for info in process_session_block_info:
                     process_num += len(info)
                 logger.info(f"session {session_id} session hash or block id count {process_num}")
-                actual_process_blocks = fn(session_id, process_session_block_info, is_session_op)
+                if edit.type == "prefetch":
+                    actual_process_blocks = fn(session_id, process_session_block_info, is_session_op)
+                else:
+                    actual_process_blocks = fn(session_id, edit.block_start, edit.block_end, process_session_block_info, is_session_op)
 
         return EditResponse(
             session_id=session_id,
