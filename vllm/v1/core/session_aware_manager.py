@@ -271,7 +271,7 @@ class SessionAwareManager:
                 protected_block_hashes = session_block_hash[0:block_end]
         
         self._ttl_manager.register(block_infos=newly_protected_hashes, session_id=session_id,
-                                   expire_at=newly_protected_ttl, protected_block_hashes=protected_block_hashes)
+            expire_at=newly_protected_ttl, protected_block_hashes=protected_block_hashes)
 
     def _on_blocks_cache_hit(
         self,
@@ -522,7 +522,14 @@ class SessionAwareManager:
 
         return block_hashes_all
 
-    def _execute_offload(self, session_id: str, block_ids_all_group: tuple[list[int], ...], is_session: bool) -> int:
+    def _execute_offload(
+        self, 
+        session_id: str, 
+        block_start: int,
+        block_end: int,
+        block_ids_all_group: tuple[list[int], ...], 
+        is_session: bool
+    ) -> int:
         """卸载指定范围的 block — 减少 session 引用 + 清除当前session的TTL（通知TTLManager）"""
         affected_block_hashes: list[BlockHash] = []
 
@@ -541,10 +548,10 @@ class SessionAwareManager:
                 if record.is_ephemeral:
                     self._ttl_manager.remove(block_id=block_id, session_id=session_id, is_notify_spm=False)
 
-                    affected_block_hashes.extend(
-                        split_base_block_hashes(record.block_hash, self.block_size[group_id], self.hash_block_size))
+                    # affected_block_hashes.extend(
+                    #     split_base_block_hashes(record.block_hash, self.block_size[group_id], self.hash_block_size))
 
-                # self._remove_session_block_ref(session_id, block_id, group_id)
+                self._remove_session_block_ref(session_id, block_id, group_id)
 
                 remaining_records = self._block_sessions[group_id].get(block_id, {}).values()
                 latest_ttl_expire_at = max(
@@ -556,21 +563,26 @@ class SessionAwareManager:
                 )
                 self.kv_cache_manager.update_block_meta(
                     block_id,
-                    delta_ref=0,
+                    delta_ref=-1,
                     ttl_expire_at=latest_ttl_expire_at,
                     is_offload_block=True,
                 )
 
+        block_start_e, block_end_e = self._expand_session_block_range(session_id, block_start, block_end)
+        affected_block_hashes.extend(self._session_block_hash.get(session_id, [])[block_start_e:block_end_e])
         res = len(affected_block_hashes)
+
+        self._ttl_manager.register(block_infos=[], session_id=session_id,
+            expire_at=time.monotonic()+3600, protected_block_hashes=affected_block_hashes)
 
         return res
 
     def _execute_prefetch(
-            self,
-            session_id: str,
-            block_hashes: list[BlockHash],
-            is_session: bool = False
-        ) -> int:
+        self,
+        session_id: str,
+        block_hashes: list[BlockHash],
+        is_session: bool = False
+    ) -> int:
         """通知 SPM 创建远端预取任务。"""
         # logger.info(f"block_hashes {block_hashes}")
         self._notify_event(
@@ -581,7 +593,14 @@ class SessionAwareManager:
         # TODO: 后续返回当前session及其子session的block hash
         return len(block_hashes)
 
-    def _execute_evict(self, session_id: str, block_ids_all_group: tuple[list[int], ...], is_session: bool) -> int:
+    def _execute_evict(
+        self, 
+        session_id: str, 
+        block_start: int,
+        block_end: int,
+        block_ids_all_group: tuple[list[int], ...], 
+        is_session: bool
+    ) -> int:
         """驱逐指定范围的 block — 减少引用 + 清除当前session的TTL
         清除本地引用，并通知 SPM 停止对应远端 PoolKey 的 Keep-Alive
         """
@@ -601,8 +620,8 @@ class SessionAwareManager:
                     if len(cur_block_session) == 0 or record is None:
                         continue
 
-                    affected_block_hashes.extend(
-                        split_base_block_hashes(record.block_hash, self.block_size[group_id], self.hash_block_size))
+                    # affected_block_hashes.extend(
+                    #     split_base_block_hashes(record.block_hash, self.block_size[group_id], self.hash_block_size))
 
                     self._remove_session_block_ref(session_id, block_id, group_id)
                     
@@ -619,6 +638,9 @@ class SessionAwareManager:
                         delta_ref=-1,
                         ttl_expire_at=latest_ttl_expire_at,
                     )
+
+            block_start_e, block_end_e = self._expand_session_block_range(session_id, block_start, block_end)
+            affected_block_hashes.extend(self._session_block_hash.get(session_id, [])[block_start_e:block_end_e])           
 
         else:
             affected_block_hashes = self._free_session_tree(session_id)
@@ -780,6 +802,55 @@ class SessionAwareManager:
         reference count and TTL expiration time.
         """
         block.reset_session_state()
+
+    def _expand_session_block_range(
+        self,
+        session_id: str,
+        block_start: int,
+        block_end: int,
+    ) -> tuple[int, int]:
+        """扩展左闭右开区间，使其包含所有 group 涉及的完整 block。
+
+        输入和输出均为 hash_block_size 粒度，区间语义均为
+        [block_start, block_end)。
+        """
+        assert block_start >= 0
+        assert block_end >= block_start
+
+        # 空区间没有涉及任何物理 block。
+        if block_start == block_end:
+            return block_start, block_end
+
+        base_block_hashes = self._session_block_hash.get(session_id)
+        if not base_block_hashes:
+            logger.warning(
+                f'There is no hash for the session_id:{session_id} '
+                f'in the _session_block_hash.')
+            return 0, 0
+
+        base_block_count = len(base_block_hashes)
+
+        expanded_start = block_start
+        expanded_end = block_end
+
+        for group_block_size in self.block_size:
+            assert group_block_size % self.hash_block_size == 0
+
+            scale_factor = group_block_size // self.hash_block_size
+
+            # 包含 block_start 的物理 block 起点。
+            group_block_start = (block_start // scale_factor) * scale_factor
+
+            # 包含 block_end 前一个位置的物理 block 的右边界。
+            group_block_end = (
+                (block_end + scale_factor - 1) // scale_factor * scale_factor
+            )
+
+            expanded_start = min(expanded_start, group_block_start)
+            expanded_end = max(expanded_end, group_block_end)
+        
+        expanded_end = min(expanded_end, base_block_count)
+        return expanded_start, expanded_end
 
 @dataclass
 class TTLBlockEntry:
