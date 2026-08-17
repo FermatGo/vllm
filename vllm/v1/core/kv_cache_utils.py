@@ -186,7 +186,6 @@ class KVCacheBlock:
         """
         return self._is_offload_block
 
-    @property
     def reset_session_state(self) -> None:
         """Reset the session reference count and ephemeral state of the block."""
         self._session_ref_cnt = 0
