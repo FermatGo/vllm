@@ -906,7 +906,7 @@ class TTLTimerWheel:
         tick_index = int(expire_at) % self.tick_count
         self.slots[tick_index].append(block)
 
-        logger.info(
+        logger.debug(
             f"Inserting block {block.block_id} into TTLTimerWheel, "
             f"block.session_id={block.session_id},"
             f"block.ttl_expire_at={block.ttl_expire_at:.2f}, "
@@ -939,7 +939,7 @@ class TTLTimerWheel:
             )
             return
 
-        logger.info(
+        logger.debug(
             "Removed block %d from TTLTimerWheel slot %d, "
             "session_id=%s, expire_at=%.2f.",
             block.block_id, tick_index,
@@ -978,7 +978,7 @@ class TTLTimerWheel:
             self.slots[self.current_slot].clear()
             self.current_slot = (self.current_slot + 1) % self.tick_count
         if len(expired) > 0:
-            logger.info(
+            logger.debug(
                 f"Advancing TTLTimerWheel to time {now:.2f}, "
                 f"(current_slot={self.current_slot})."
                 f" Expired blocks: {[block.block_id for block in expired]}."
@@ -1044,8 +1044,10 @@ class TTLManager:
           - 否则忽略（保留更晚的过期时间）。
         如果不存在：创建新的 TTLBlockEntry 并插入 timer wheel。
         """
+        protected_hash_len = 0
         if protected_block_hashes is not None:
             block_infos.append((0,protected_block_hashes))
+            protected_hash_len = len(protected_block_hashes)
 
         logger.debug(f"TTL Manager: working to register {len(block_infos)} blocks into timer wheel")
         for block_info in block_infos:
@@ -1067,8 +1069,8 @@ class TTLManager:
                 )
                 self._entries[key] = entry
                 self._timer_wheel.insert(entry, expire_at)
-            logger.info(
-                f"Register block_id {block_info[0]} and session id {session_id} with ttl {expire_at} in TTL Manager")
+        logger.info(
+            f"Register session id {session_id} with ttl {expire_at} and protected hash length {protected_hash_len} in TTL Manager")
 
         protected_key = (0, session_id)
         if protected_key in self._entries:
@@ -1091,7 +1093,7 @@ class TTLManager:
                 remove_hashes.update(entry.block_hashes)
                 self._spm_notify_func("session_ttl_expired", session_id=session_id, block_hashes=list(remove_hashes))
         else:
-            logger.info(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
+            logger.warning(f"Could not find block_id {block_id} and session id {session_id} in TTL Manager")
 
     def tick(self, now: float | None = None) -> None:
         """推进 timer wheel，处理所有已过期的 entry。
