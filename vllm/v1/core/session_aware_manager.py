@@ -132,14 +132,10 @@ class SessionAwareManager:
                     self.reset_block_state(block)
 
                     # 清理TTLManager中这个物理 block 的所有旧 session 引用
-                    old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
-                    for old_session_id in old_session_ids:
-                        record = self._block_sessions[group_id][block_id].get(old_session_id)
-                        if record and record.is_ephemeral:
-                            self._ttl_manager.remove(block_id, old_session_id)
+                    self._clear_old_block_sessions_ttl(block_id)
 
                     # 清理SAM中这个物理 block 的所有旧 session 引用。
-                    self._clear_block_session_refs(block_id, group_id)
+                    self._clear_block_session_refs(block_id)
             return
 
         is_prefill = request.num_output_tokens == 0
@@ -206,14 +202,10 @@ class SessionAwareManager:
                 self.reset_block_state(block)
 
                 # 清理TTLManager中这个物理 block 的所有旧 session 引用
-                old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
-                for old_session_id in old_session_ids:
-                    record = self._block_sessions[group_id][block_id].get(old_session_id)
-                    if record and record.is_ephemeral:
-                        self._ttl_manager.remove(block_id, old_session_id)
+                self._clear_old_block_sessions_ttl(block_id)
 
                 # 清理SAM中这个物理 block 的所有旧 session 引用。
-                self._clear_block_session_refs(block_id, group_id)
+                self._clear_block_session_refs(block_id)
 
                 # allocate_slots理论上只传 newly-cached blocks，保留检查用于防御异常情况。
                 if block.block_hash is None:
@@ -430,11 +422,12 @@ class SessionAwareManager:
             if parent_session_id and parent_session_id in self._sessions and parent_session_id != session_id:
                 self._sessions[parent_session_id].children.add(session_id)
 
-    def _clear_block_session_refs(self, block_id: int, group_id: int) -> None:
+    def _clear_block_session_refs(self, block_id: int) -> None:
         """清除指定 block 的所有 session 引用（SAM 内部）"""
-        if block_id in self._block_sessions[group_id]:
-            for session_id in list(self._block_sessions[group_id][block_id].keys()):
-                self._remove_session_block_ref(session_id, block_id, group_id)
+        for group_id in range(len(self._block_sessions)):
+            if block_id in self._block_sessions[group_id]:
+                for session_id in list(self._block_sessions[group_id][block_id].keys()):
+                    self._remove_session_block_ref(session_id, block_id, group_id)
 
     def _add_session_block_ref(self, record: SessionBlockRecord, group_id: int) -> None:
         """添加 session 对 block 的引用（SAM 内部）"""
@@ -851,6 +844,15 @@ class SessionAwareManager:
         
         expanded_end = min(expanded_end, base_block_count)
         return expanded_start, expanded_end
+
+    def _clear_old_block_sessions_ttl(self, block_id: int) -> None:
+        # 清理TTLManager中这个物理 block 的所有旧 session 引用
+        for group_id in range(len(self._block_sessions)):
+            old_session_ids = list(self._block_sessions[group_id].get(block_id, {}).keys())
+            for old_session_id in old_session_ids:
+                record = self._block_sessions[group_id][block_id].get(old_session_id)
+                if record and record.is_ephemeral:
+                    self._ttl_manager.remove(block_id, old_session_id)
 
 @dataclass
 class TTLBlockEntry:
