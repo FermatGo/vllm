@@ -369,10 +369,10 @@ class Scheduler(SchedulerInterface):
         return num_new_tokens
 
     def is_agent_hint_management_request(self, request: Request) -> bool:
-        return self.agent_hint_manager.is_management_request(request)
+        return self.agent_hint_manager.is_kvc_management_request(request)
 
-    def handle_agent_hint_management_request(self, request: Request):
-        return self.agent_hint_manager.handle_management_request(request)
+    def register_agent_hint_management_request(self, request: Request):
+        return self.agent_hint_manager.register_kvc_management_request(request)
 
     def has_prefetch_req(self):
         return self.agent_hint_manager.has_pending_work()

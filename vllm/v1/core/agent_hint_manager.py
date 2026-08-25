@@ -42,10 +42,10 @@ class AgentHintManager:
     these lifecycle hooks, while plugins own all session and cache policy.
     """
 
-    def is_management_request(self, request: Request) -> bool:
+    def is_kvc_management_request(self, request: Request) -> bool:
         return False
 
-    def handle_management_request(self, request: Request) -> AgentHintResponse | None:
+    def register_kvc_management_request(self, request: Request) -> AgentHintResponse | None:
         return None
 
     def on_request_added(self, request: Request) -> None:

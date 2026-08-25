@@ -1194,7 +1194,7 @@ class EngineCoreProc(EngineCore):
         if request_type != EngineCoreRequestType.ADD:
             return
         req, request_wave = request
-        agent_hint_response = self.scheduler.handle_agent_hint_management_request(req)
+        agent_hint_response = self.scheduler.register_agent_hint_management_request(req)
         list = [
             EngineCoreOutput(
                 req.request_id,
