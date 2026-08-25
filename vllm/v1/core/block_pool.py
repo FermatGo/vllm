@@ -165,7 +165,7 @@ class BlockPool:
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        self.free_block_queue = create_free_kv_cache_block_queue(self.blocks)
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
@@ -507,3 +507,15 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+
+def create_free_kv_cache_block_queue(
+    blocks: list[KVCacheBlock],
+) -> FreeKVCacheBlockQueue:
+    """Create the free-block queue for the active Agent Hint backend."""
+    from vllm.v1.core.agent_hint_manager import get_agent_hint_backend
+
+    backend = get_agent_hint_backend()
+    if backend is None:
+        return FreeKVCacheBlockQueue(blocks)
+    return backend.create_free_kv_cache_block_queue(blocks)

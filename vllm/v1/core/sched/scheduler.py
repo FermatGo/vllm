@@ -8,7 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 import numpy as np
-import traceback
+
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -32,16 +32,17 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.v1.core.agent_hint_manager import (
+    AgentHintManagerContext,
+    create_agent_hint_manager,
+)
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import get_block_hash
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
-from vllm.v1.core.session_aware_manager import SessionAwareManager
-from vllm.v1.core.session_aware_pooling_manager import SessionAwarePoolingManager
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -54,7 +55,11 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, ContextManagementEditsParams, ContextManagementParams, AgentHintParams
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -63,7 +68,6 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
-from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 
@@ -303,23 +307,16 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
-        self.session_aware_manager = SessionAwareManager(self.kv_cache_manager)
-        self.session_pooling_manager = None
-        if self.connector is None:
-            logger.warning(f"scheduler does not have connector, failed to init SPM")
-        else:
-            self.session_pooling_manager = SessionAwarePoolingManager(sam=self.session_aware_manager,
-                                                                      add_request=self.add_request,
-                                                                      connector=self.connector)
-            self.session_pooling_manager.block_size = hash_block_size
-            self.session_pooling_manager.start()
-            logger.info(f"Init session pooling manager self.block_size {self.block_size} hash_block_size {hash_block_size}")
-
-        self.kv_cache_manager.register_session_event_callbacks(
-            on_blocks_allocated=self.session_aware_manager.on_blocks_allocated_for_request,
-            on_block_cache_hit=self.session_aware_manager.on_block_cache_hit_for_request,
+        self.agent_hint_manager = create_agent_hint_manager(
+            AgentHintManagerContext(
+                vllm_config=self.vllm_config,
+                kv_cache_manager=self.kv_cache_manager,
+                connector=self.connector,
+                add_request=self.add_request,
+                block_size=self.block_size,
+                hash_block_size=hash_block_size,
+            )
         )
-
 
     def _mamba_block_aligned_split(
         self,
@@ -371,29 +368,14 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
-    def register_context_management_request(
-        self,
-        request_id: str,
-        session_id: str | None,
-        context_management: "ContextManagementParams | None",
-    ) -> list[Any] | None:
-        """Register a new request with its session context (cache/prompt hints).
-        Args:
-            request_id: Unique ID of the incoming request.
-            session_id: Session this request belongs to, or ``None``
-                for stateless (non-session) requests.
-            context_management: Parsed ``context_management`` dict from
-                the request's ``agent_hint`` payload, or ``None`` when
-                the request carries no session context.
+    def is_agent_hint_management_request(self, request: Request) -> bool:
+        return self.agent_hint_manager.is_management_request(request)
 
-        Returns:
-            Return value of ``register_agent_hint``, typically ``None``
-            or a list of opaque cache metadata for the caller.
-        """
-        return self.session_aware_manager.register_agent_hint(request_id, session_id, context_management)
+    def handle_agent_hint_management_request(self, request: Request):
+        return self.agent_hint_manager.handle_management_request(request)
 
     def has_prefetch_req(self):
-        return len(self.session_pooling_manager.prefetch_waiting_queue) > 0 if self.session_pooling_manager else False
+        return self.agent_hint_manager.has_pending_work()
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -432,15 +414,12 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        self.session_aware_manager._ttl_manager.tick()
-        if self.session_pooling_manager is not None:
-            self.session_pooling_manager.process_prefetch_req(num_unfinished_requests=self.get_num_unfinished_requests())
+        self.agent_hint_manager.on_step(self.get_num_unfinished_requests())
 
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            if request.agent_hint and request.agent_hint.session_id:
-                self.session_aware_manager.register_session_block_hash(request.agent_hint.session_id, request.block_hashes)
+            self.agent_hint_manager.on_request_scheduled(request)
 
             if (
                 request.num_output_placeholders > 0
@@ -631,8 +610,7 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
-                if request.agent_hint and request.agent_hint.session_id:
-                    self.session_aware_manager.register_session_block_hash(request.agent_hint.session_id, request.block_hashes)
+                self.agent_hint_manager.on_request_scheduled(request)
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -831,7 +809,10 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.free(request)
                     break
                 logger.debug(
-                    f"Prefill block allocated: req id={request.request_id} block ids={new_blocks.get_block_ids()}")
+                    "Prefill block allocated: req id=%s block ids=%s",
+                    request.request_id,
+                    new_blocks.get_block_ids(),
+                )
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
@@ -1817,10 +1798,7 @@ class Scheduler(SchedulerInterface):
             self.requests[request.request_id] = request
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
-            if self.session_aware_manager:
-                self.session_aware_manager.register_agent_hint(request.request_id,
-                    request.agent_hint.session_id if request.agent_hint else None,
-                    request.agent_hint.context_management if request.agent_hint else None)
+            self.agent_hint_manager.on_request_added(request)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
@@ -1906,7 +1884,7 @@ class Scheduler(SchedulerInterface):
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self.kv_cache_manager.free(request)
-        self.session_aware_manager._session_controller.on_request_completed(request.request_id)
+        self.agent_hint_manager.on_request_finished(request)
         del self.requests[request.request_id]
 
     @property
@@ -2059,10 +2037,9 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        self.agent_hint_manager.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
-        if self.session_pooling_manager is not None:
-            self.session_pooling_manager.stop()
 
     ########################################################################
     # KV Connector Related Methods

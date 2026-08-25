@@ -413,8 +413,8 @@ class KVCacheManager:
             )
 
             if (
-                num_new_computed_tokens > 0 
-                and new_computed_blocks is not None 
+                num_new_computed_tokens > 0
+                and new_computed_blocks is not None
                 and self._on_block_cache_hit is not None
             ):
                 self._on_block_cache_hit(request, new_computed_blocks)
@@ -443,14 +443,11 @@ class KVCacheManager:
             request.num_tokens,
         )
 
-        newly_cached_blocks, cached_blocks_len_before = (
-            self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        newly_cached_blocks, cached_blocks_len_before = self.coordinator.cache_blocks(
+            request, num_tokens_to_cache
         )
 
-        if (
-            self._on_blocks_allocated is not None
-            and any(newly_cached_blocks)
-        ):
+        if self._on_blocks_allocated is not None and any(newly_cached_blocks):
             self._on_blocks_allocated(
                 request,
                 self.create_kv_cache_blocks(newly_cached_blocks),
@@ -583,27 +580,7 @@ class KVCacheManager:
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
         self.coordinator.new_step_starts()
-    
-    def update_block_meta(
-        self,
-        block_id: int,
-        delta_ref: int = 0,
-        ttl_expire_at: float | None = None,
-        is_offload_block: bool | None = None,
-    ) -> None:
-        """统一修改 block 的 metadata。
-        SAM 的所有事件都转化为对此接口的调用。
-        """
-        block = self.block_pool.blocks[block_id]
-        if ttl_expire_at is not None:
-            block._ttl_expire_at = ttl_expire_at
-        if delta_ref != 0:
-            block._session_ref_cnt = max(0, block._session_ref_cnt+delta_ref)
-        if is_offload_block is not None:
-            block._is_offload_block = is_offload_block
-        if block.ref_cnt == 0 and not block.is_null:
-            self.block_pool.free_block_queue.on_block_meta_changed(block)
-    
+
     def register_session_event_callbacks(
         self,
         on_blocks_allocated=None,

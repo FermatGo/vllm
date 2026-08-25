@@ -63,7 +63,6 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
     UtilityResult,
-    AgentHintResponse
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
@@ -344,7 +343,11 @@ class EngineCore:
                 "Disabling KVTransfer for this request."
             )
         self.scheduler.add_request(request)
-        logger.info(f"add request, request_id = {request.request_id}, num_prompt_tokens = {request.num_prompt_tokens}")
+        logger.info(
+            "add request, request_id=%s, num_prompt_tokens=%d",
+            request.request_id,
+            request.num_prompt_tokens,
+        )
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -1173,33 +1176,35 @@ class EngineCoreProc(EngineCore):
 
         raise SystemExit
 
+    def _is_agent_hint_session_management(
+        self,
+        request_type: EngineCoreRequestType,
+        request: Any,
+    ) -> bool:
+        if request_type != EngineCoreRequestType.ADD:
+            return False
+        req, request_wave = request
+        return bool(req and self.scheduler.is_agent_hint_management_request(req))
 
-    def _is_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any) -> bool:
-        if request_type == EngineCoreRequestType.ADD:
-            req, request_wave = request
-            is_session_management = req and req.agent_hint and req.agent_hint.context_management and req.agent_hint.context_management.manage_request
-            return is_session_management
-        return False
-
-
-    def _process_agent_hint_session_management(self, request_type: EngineCoreRequestType, request: Any):
-        if request_type == EngineCoreRequestType.ADD:
-            req, request_wave = request
-            edits_results = self.scheduler.register_context_management_request(
+    def _process_agent_hint_session_management(
+        self,
+        request_type: EngineCoreRequestType,
+        request: Any,
+    ) -> None:
+        if request_type != EngineCoreRequestType.ADD:
+            return
+        req, request_wave = request
+        agent_hint_response = self.scheduler.handle_agent_hint_management_request(req)
+        list = [
+            EngineCoreOutput(
                 req.request_id,
-                req.agent_hint.session_id if req.agent_hint else None,
-                req.agent_hint.context_management if req.agent_hint else None)
-
-            list = [
-                EngineCoreOutput(req.request_id, [1], finish_reason=FinishReason.LENGTH,
-                                 agent_hint_response=AgentHintResponse(
-                                     session_id=req.agent_hint.session_id if req.agent_hint else None,
-                                     edit_results=edits_results
-                                 ))
-            ]
-            outputs = EngineCoreOutputs(engine_index=req.client_index, outputs=list)
-            self.output_queue.put_nowait((req.client_index, outputs))
-
+                [1],
+                finish_reason=FinishReason.LENGTH,
+                agent_hint_response=agent_hint_response,
+            )
+        ]
+        outputs = EngineCoreOutputs(engine_index=req.client_index, outputs=list)
+        self.output_queue.put_nowait((req.client_index, outputs))
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1218,7 +1223,7 @@ class EngineCoreProc(EngineCore):
             block = self.process_input_queue_block
             try:
                 req = self.input_queue.get(block=block)
-                if self._is_agent_hint_session_management(*req): #
+                if self._is_agent_hint_session_management(*req):
                     self._process_agent_hint_session_management(*req)
                 else:
                     self._handle_client_request(*req)
@@ -1233,7 +1238,7 @@ class EngineCoreProc(EngineCore):
         # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
-            if self._is_agent_hint_session_management(*req):  #
+            if self._is_agent_hint_session_management(*req):
                 self._process_agent_hint_session_management(*req)
             else:
                 self._handle_client_request(*req)
