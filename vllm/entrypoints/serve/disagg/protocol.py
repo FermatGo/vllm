@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field, field_validator
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    AgentHintParams,
     ChatCompletionLogProbs,
 )
 from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
@@ -111,12 +110,14 @@ class GenerateRequest(BaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
-    agent_hint: AgentHintParams | None = Field(
+    agent_hint: dict | None = Field(
         default=None,
         description=(
             "Agent behavior hint forwarded from the chat completion "
             "request. Carried through the render step so the generate "
-            "service can apply session/cache/context management."
+            "service can apply session/cache/context management. "
+            "Forwarded as an opaque dict; the active hardware backend "
+            "interprets its schema."
         ),
     )
 

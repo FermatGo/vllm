@@ -180,17 +180,6 @@ class CacheControlParams(OpenAIBaseModel):
     )
 
 
-class AgentHintParams(OpenAIBaseModel):
-    """Agent 行为提示参数，通过 extra_body.agent_hint 传入"""
-    session_id: str | None = Field(default=None)
-    parent_session_id: str | None = Field(default=None)
-    cache_control: CacheControlParams | None = Field(default=None)
-    context_management: ContextManagementParams | None = Field(default=None)
-    # 以下字段仅设计预留
-    latency_control: dict | None = Field(default=None)
-    priority_control: dict | None = Field(default=None)
-
-
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -231,8 +220,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # NOTE this will be ignored by vLLM
     user: str | None = None
 
-    # 通过 OpenAI SDK 的 extra_body 机制传入，所有字段收纳在 agent_hint 下
-    agent_hint: AgentHintParams | None = Field(default=None)
+    # 通过 OpenAI SDK 的 extra_body 机制传入，所有字段收纳在 agent_hint 下。
+    # 这里不再做强类型校验，整个 payload 以 opaque dict 透传给引擎核心，
+    # 由激活的硬件后端（如 vllm-ascend）负责解析 schema。
+    agent_hint: dict | None = Field(default=None)
 
     # --8<-- [start:chat-completion-sampling-params]
     use_beam_search: bool = False
@@ -877,13 +868,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.agent_hint is None:
             return self
         else:
-            if not self.agent_hint.session_id:
+            if not self.agent_hint.get("session_id"):
                 logger.warning('session_id is empty, set agent_hint None.')
                 self.agent_hint = None
                 return self
-            
-            if self.agent_hint.context_management and not self.agent_hint.context_management.manage_request and not self.agent_hint.context_management.edits:
-                self.agent_hint.context_management.edits = []
+
+            cm = self.agent_hint.get("context_management")
+            if cm and not cm.get("manage_request") and not cm.get("edits"):
+                cm["edits"] = []
 
         return self
 

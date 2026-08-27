@@ -24,8 +24,6 @@ from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
-from vllm.v1.engine import CacheControlParams, ContextManagementParams, ContextManagementEditsParams, AgentHintParams
-
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
@@ -77,7 +75,7 @@ class Request:
         resumable: bool = False,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
-        agent_hint: AgentHintParams | None = None,
+        agent_hint: dict | None = None,
         is_prefetch_req: bool = False
     ) -> None:
         self.request_id = request_id

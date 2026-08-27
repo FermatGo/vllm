@@ -78,42 +78,6 @@ class EngineCoreReadyResponse:
     dp_stats_address: str | None
 
 
-@dataclass
-class ContextManagementEditsParams: # 上下文编辑
-    type: Literal["offload","prefetch","evict"] = "offload"
-    start: int | None = None  # 起始 message index（pymotor 侧语义）
-    end: int | None = None  # 结束 message index（pymotor 侧语义）
-    target: Literal["session", "messages", "tools"] = "messages"
-    block_start: int | None = None  # pymotor 转换的起始 block index
-    block_end: int | None = None  # pymotor 转换的结束 block index
-
-
-@dataclass
-class ContextManagementParams:
-    manage_request: bool | None = False  # 仅kvc管理请求，出现该字段表示请求本身内容并不会被执行
-    edits: list[ContextManagementEditsParams] = None
-
-
-@dataclass
-class CacheControlParams:
-    type: Literal["ephemeral"] = "ephemeral"  # 仅支持 ephemeral
-    ttl: float = 300.0  # 缓存保留时间（秒），默认5min，最大1h
-    msg_offset: int | None = None
-    block_offset: int | None = None
-    token_offset: int | None = None
-
-
-@dataclass
-class AgentHintParams:
-    """Agent 行为提示参数，通过 extra_body.agent_hint 传入"""
-    session_id: str | None = None
-    parent_session_id: str | None = None
-    cache_control: CacheControlParams | None = None
-    context_management: ContextManagementParams | None = None
-    latency_control: dict | None = None
-    priority_control: dict | None = None
-
-
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -153,8 +117,9 @@ class EngineCoreRequest(
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, Any] | None = None
 
-    # agent_hint
-    agent_hint: AgentHintParams | None = None
+    # agent_hint: opaque dict forwarded from the OpenAI protocol; the active
+    # hardware plugin (e.g. vllm-ascend) interprets its contents.
+    agent_hint: dict | None = None
 
 
     @property
