@@ -54,7 +54,6 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )
-    logger.info(f'========session_id= {request.agent_hint.get("session_id")}')
     handler = chat(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Chat Completions API")
