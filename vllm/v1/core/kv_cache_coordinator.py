@@ -283,14 +283,8 @@ class KVCacheCoordinator(ABC):
                 that need to be cached
                 (including tokens that are already cached).
         """
-        for manager in self.single_type_managers:
-            manager.cache_blocks(
-                request,
-                num_computed_tokens,
-                retention_interval=self.retention_interval,
-            )
         results = [
-            manager.cache_blocks(request, num_computed_tokens)
+            manager.cache_blocks(request, num_computed_tokens, retention_interval=self.retention_interval, )
             for manager in self.single_type_managers
         ]
 
@@ -652,7 +646,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         if self.enable_partial_hash_hits:
             aligned_num_computed_tokens = num_computed_tokens
         else:
@@ -666,6 +660,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 // self.scheduler_block_size
                 * self.scheduler_block_size
             )
+
+        result = []
         for manager in self.single_type_managers:
             num_tokens_to_cache = aligned_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
@@ -679,11 +675,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             # (``scheduler_block_size``); retention is passed separately so it
             # can keep both the coarse segment tails and the fine replay
             # boundary (which needs the fine value).
-            manager.cache_blocks(
+            result.extend(manager.cache_blocks(
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
-            )
+            ))
+        return result
 
     def find_longest_cache_hit(
         self,
