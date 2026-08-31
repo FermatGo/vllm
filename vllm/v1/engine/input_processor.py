@@ -28,9 +28,13 @@ from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import (
+    EngineCoreRequest,
+)
 
 logger = init_logger(__name__)
+
+
 
 
 class InputProcessor:
@@ -367,6 +371,22 @@ class InputProcessor:
                     )
                 )
 
+
+        # agent_hint: forward the OpenAI-protocol payload as an opaque dict
+        # so the active hardware backend can interpret it. Pydantic models
+        # and plain mappings are both supported.
+        raw_agent_hint = prompt.get("agent_hint")
+        if raw_agent_hint is None:
+            agent_hint = None
+        elif hasattr(raw_agent_hint, "model_dump"):
+            agent_hint = raw_agent_hint.model_dump()
+        elif isinstance(raw_agent_hint, Mapping):
+            agent_hint = dict(raw_agent_hint)
+        else:
+            agent_hint = dict(raw_agent_hint)
+
+
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -382,6 +402,7 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            agent_hint=agent_hint
         )
 
     def _validate_prompt_len(

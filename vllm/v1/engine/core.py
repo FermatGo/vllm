@@ -474,6 +474,12 @@ class EngineCore:
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
 
+        logger.info(
+            "add request, request_id=%s, num_prompt_tokens=%d",
+            request.request_id,
+            request.num_prompt_tokens,
+        )
+
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
 
@@ -582,7 +588,7 @@ class EngineCore:
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
-        if not self.scheduler.has_requests():
+        if self.scheduler.has_requests() or self.scheduler.has_prefetch_req():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
@@ -641,7 +647,7 @@ class EngineCore:
 
         model_executed = False
         deferred_scheduler_output = None
-        if self.scheduler.has_requests():
+        if self.scheduler.has_requests() or self.scheduler.has_prefetch_req():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -1349,6 +1355,7 @@ class EngineCoreProc(EngineCore):
             self.engines_running
             or self.scheduler.has_requests()
             or bool(self.batch_queue)
+            or self.scheduler.has_prefetch_req()
         )
 
     def is_running(self) -> bool:
@@ -1364,6 +1371,36 @@ class EngineCoreProc(EngineCore):
             self._process_engine_step()
 
         raise SystemExit
+
+    def _is_agent_hint_session_management(
+        self,
+        request_type: EngineCoreRequestType,
+        request: Any,
+    ) -> bool:
+        if request_type != EngineCoreRequestType.ADD:
+            return False
+        req, request_wave = request
+        return bool(req and self.scheduler.is_agent_hint_management_request(req))
+
+    def _process_agent_hint_session_management(
+        self,
+        request_type: EngineCoreRequestType,
+        request: Any,
+    ) -> None:
+        if request_type != EngineCoreRequestType.ADD:
+            return
+        req, request_wave = request
+        agent_hint_response = self.scheduler.register_agent_hint_management_request(req)
+        list = [
+            EngineCoreOutput(
+                req.request_id,
+                [1],
+                finish_reason=FinishReason.LENGTH,
+                agent_hint_response=agent_hint_response,
+            )
+        ]
+        outputs = EngineCoreOutputs(engine_index=req.client_index, outputs=list)
+        self.output_queue.put_nowait((req.client_index, outputs))
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1382,7 +1419,10 @@ class EngineCoreProc(EngineCore):
             block = self.process_input_queue_block
             try:
                 req = self.input_queue.get(block=block)
-                self._handle_client_request(*req)
+                if self._is_agent_hint_session_management(*req):
+                    self._process_agent_hint_session_management(*req)
+                else:
+                    self._handle_client_request(*req)
             except queue.Empty:
                 break
             if not block:
@@ -1394,7 +1434,10 @@ class EngineCoreProc(EngineCore):
         # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
-            self._handle_client_request(*req)
+            if self._is_agent_hint_session_management(*req):
+                self._process_agent_hint_session_management(*req)
+            else:
+                self._handle_client_request(*req)
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""

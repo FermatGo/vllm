@@ -31,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.v1.core.agent_hint_manager import (
+    AgentHintManagerContext,
+    create_agent_hint_manager,
+)
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -351,6 +355,16 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+        self.agent_hint_manager = create_agent_hint_manager(
+            AgentHintManagerContext(
+                vllm_config=self.vllm_config,
+                kv_cache_manager=self.kv_cache_manager,
+                connector=self.connector,
+                add_request=self.add_request,
+                block_size=self.block_size,
+                hash_block_size=hash_block_size,
+            )
+        )
 
     def _mamba_block_aligned_split(
         self,
@@ -422,6 +436,15 @@ class Scheduler(SchedulerInterface):
         end = min((s for s in stops if start < s < end), default=end)
         return max(end - start, 0)
 
+    def is_agent_hint_management_request(self, request: Request) -> bool:
+        return self.agent_hint_manager.is_kvc_management_request(request)
+
+    def register_agent_hint_management_request(self, request: Request):
+        return self.agent_hint_manager.register_kvc_management_request(request)
+
+    def has_prefetch_req(self):
+        return self.agent_hint_manager.has_pending_work()
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -468,8 +491,12 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+        self.agent_hint_manager.on_step(self.get_num_unfinished_requests())
+
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+
+            self.agent_hint_manager.on_request_scheduled(request)
 
             if (
                 request.num_output_placeholders > 0
@@ -678,6 +705,8 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                self.agent_hint_manager.on_request_scheduled(request)
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -954,7 +983,11 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
-
+                logger.debug(
+                    "Prefill block allocated: req id=%s block ids=%s",
+                    request.request_id,
+                    new_blocks.get_block_ids(),
+                )
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
@@ -2140,6 +2173,7 @@ class Scheduler(SchedulerInterface):
                 self.connector.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+            self.agent_hint_manager.on_request_added(request)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
@@ -2236,6 +2270,7 @@ class Scheduler(SchedulerInterface):
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self._free_request_blocks(request)
+        self.agent_hint_manager.on_request_finished(request)
         del self.requests[request.request_id]
 
     @property
@@ -2464,6 +2499,7 @@ class Scheduler(SchedulerInterface):
         logger.debug_once("[shutdown] Scheduler: start")
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        self.agent_hint_manager.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
 

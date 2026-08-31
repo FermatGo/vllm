@@ -77,6 +77,8 @@ class Request:
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
+        agent_hint: dict | None = None,
+        is_prefetch_req: bool = False
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -102,6 +104,7 @@ class Request:
         self.kv_transfer_params: dict[str, Any] | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
+        self.is_prefetch_req = is_prefetch_req
 
         if pooling_params is not None:
             # Pooling models.
@@ -139,7 +142,7 @@ class Request:
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds
-        )
+        ) if not self.is_prefetch_req else len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = (
             self.prompt_token_ids.copy()
@@ -213,6 +216,8 @@ class Request:
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately
+        # agent_hint
+        self.agent_hint = agent_hint
 
     @classmethod
     def from_engine_core_request(
@@ -239,6 +244,7 @@ class Request:
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
+            agent_hint=request.agent_hint
         )
 
     def append_output_token_ids(

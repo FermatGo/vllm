@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.engine import EngineCoreOutput, AgentHintResponse
 
 logger = init_logger(__name__)
 
@@ -123,6 +124,7 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
+        agent_hint_response: AgentHintResponse | None = None,
         *,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
@@ -148,6 +150,7 @@ class RequestOutput:
         self.num_cache_creation_tokens = num_cache_creation_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
+        self.agent_hint_response = agent_hint_response
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""

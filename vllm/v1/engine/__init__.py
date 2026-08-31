@@ -135,6 +135,10 @@ class EngineCoreRequest(
     # request_finished hook. Used to free P-side prefill blocks when a
     # KV-transfer request is rejected on the D node before engine admission.
     abort_immediately: bool = False
+    # agent_hint: opaque dict forwarded from the OpenAI protocol; the active
+    # hardware plugin (e.g. vllm-ascend) interprets its contents.
+    agent_hint: dict | None = None
+
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -172,6 +176,12 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
+@dataclass
+class AgentHintResponse:
+    session_id: str | None
+    edit_results: list[Any] | None = None
+
+
 class EngineCoreOutput(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -200,6 +210,8 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    agent_hint_response: AgentHintResponse | None = None
 
     @property
     def finished(self) -> bool:
@@ -247,6 +259,15 @@ class EngineCoreOutputs(
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
+
+    def have_agent_hint_outputs(self):
+        """check whether EngineCoreOutputs have manage request output """
+        have_manage_outputs = False
+        for output in self.outputs:
+            if output.agent_hint_response:
+                have_manage_outputs = True
+                break
+        return have_manage_outputs
 
 
 class EngineCoreRequestType(enum.Enum):

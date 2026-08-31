@@ -419,4 +419,7 @@ class OnlineRenderer:
                     request=request,
                 )
 
+        if request.agent_hint is not None:
+            engine_input['agent_hint'] = request.agent_hint
+
         return conversation, [engine_input]

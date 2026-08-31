@@ -405,7 +405,7 @@ class SingleTypeKVCacheManager(ABC):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
-    ) -> None:
+    ) -> tuple[list[KVCacheBlock], int]:
         """
         Cache the blocks for the request.
 
@@ -422,7 +422,7 @@ class SingleTypeKVCacheManager(ABC):
         num_full_blocks = num_tokens // self.block_size
 
         if num_cached_blocks >= num_full_blocks:
-            return
+            return [], num_cached_blocks
 
         # Token boundaries whose reachable tail must be retained under sparse
         # retention: the replay boundary (``num_prompt - 1``, capped by
@@ -451,6 +451,8 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+        newly_cached_blocks = self.req_to_blocks[request.request_id][num_cached_blocks:num_full_blocks]
+        return newly_cached_blocks, num_cached_blocks
 
     @classmethod
     def reachable_block_mask(
@@ -755,12 +757,13 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
-    ) -> None:
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+    ) -> tuple[list[KVCacheBlock], int]:
+        newly_cached_blocks, num_cached_blocks = super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
-            return
+            return newly_cached_blocks, num_cached_blocks
         self._cache_partial_tail_block(request, num_tokens)
+        return newly_cached_blocks, num_cached_blocks
 
     def _cache_partial_tail_block(
         self,
@@ -1622,9 +1625,9 @@ class MambaManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
-    ) -> None:
+    ) -> tuple[list[KVCacheBlock], int]:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        newly_cached_blocks, num_cached_blocks = super().cache_blocks(request, num_tokens)
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
@@ -1641,6 +1644,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 if block.is_null or block.block_hash is None:
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
+        return newly_cached_blocks, num_cached_blocks
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()

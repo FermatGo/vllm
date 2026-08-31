@@ -183,6 +183,9 @@ class KVCacheManager:
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
 
+        self._on_blocks_allocated = None
+        self._on_block_cache_hit = None
+
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -269,7 +272,7 @@ class KVCacheManager:
             num_new_computed_tokens + num_uncached if num_uncached else 0
         )
 
-        if self.log_stats:
+        if self.log_stats and not request.is_prefetch_req:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.record(
                 num_tokens=request.num_tokens,
@@ -478,6 +481,13 @@ class KVCacheManager:
                 num_external_computed_tokens=num_external_computed_tokens,
             )
 
+            if (
+                num_new_computed_tokens > 0
+                and new_computed_blocks is not None
+                and self._on_block_cache_hit is not None
+            ):
+                self._on_block_cache_hit(request, new_computed_blocks)
+
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
             num_tokens_need_slot,
@@ -485,10 +495,12 @@ class KVCacheManager:
             num_encoder_tokens,
         )
 
+        new_kv_cache_blocks = self.create_kv_cache_blocks(new_blocks)
+
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return self.create_kv_cache_blocks(new_blocks)
+            return new_kv_cache_blocks
 
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
         # + num_external_computed_tokens + num_new_tokens, but must exclude
@@ -499,9 +511,19 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
-        return self.create_kv_cache_blocks(new_blocks)
+        newly_cached_blocks, cached_blocks_len_before = self.coordinator.cache_blocks(
+            request, num_tokens_to_cache
+        )
+
+        if self._on_blocks_allocated is not None and any(newly_cached_blocks):
+            self._on_blocks_allocated(
+                request,
+                self.create_kv_cache_blocks(newly_cached_blocks),
+                cached_blocks_len_before,
+            )
+
+        return new_kv_cache_blocks
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -758,3 +780,11 @@ class KVCacheManager:
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""
         self.coordinator.new_step_starts()
+
+    def register_session_event_callbacks(
+        self,
+        on_blocks_allocated=None,
+        on_block_cache_hit=None,
+    ) -> None:
+        self._on_blocks_allocated = on_blocks_allocated
+        self._on_block_cache_hit = on_block_cache_hit

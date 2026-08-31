@@ -1075,6 +1075,7 @@ class OpenAIServingChat(GenerateBaseServing):
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
             metrics=per_request_metrics,
+            agent_hint_response=final_res.agent_hint_response if final_res.agent_hint_response else None
         )
 
         # Log complete response if output logging is enabled
