@@ -451,7 +451,9 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
-        newly_cached_blocks = self.req_to_blocks[request.request_id][num_cached_blocks:num_full_blocks]
+        newly_cached_blocks = self.req_to_blocks[request.request_id][
+            num_cached_blocks:num_full_blocks
+        ]
         return newly_cached_blocks, num_cached_blocks
 
     @classmethod

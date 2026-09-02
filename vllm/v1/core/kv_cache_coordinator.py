@@ -284,7 +284,11 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         results = [
-            manager.cache_blocks(request, num_computed_tokens, retention_interval=self.retention_interval, )
+            manager.cache_blocks(
+                request, 
+                num_computed_tokens, 
+                retention_interval=self.retention_interval
+            )
             for manager in self.single_type_managers
         ]
 
@@ -646,7 +650,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
+    def cache_blocks(
+        self, 
+        request: Request, 
+        num_computed_tokens: int
+    ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         if self.enable_partial_hash_hits:
             aligned_num_computed_tokens = num_computed_tokens
         else:
@@ -661,7 +669,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 * self.scheduler_block_size
             )
 
-        result = []
+        results = []
         for manager in self.single_type_managers:
             num_tokens_to_cache = aligned_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
@@ -675,12 +683,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             # (``scheduler_block_size``); retention is passed separately so it
             # can keep both the coarse segment tails and the fine replay
             # boundary (which needs the fine value).
-            result.extend(manager.cache_blocks(
+            results.append(manager.cache_blocks(
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
             ))
-        return result
+
+        newly_cached_blocks = tuple(result[0] for result in results)
+        cached_blocks_start = tuple(result[1] for result in results)
+
+        return newly_cached_blocks, cached_blocks_start
 
     def find_longest_cache_hit(
         self,
