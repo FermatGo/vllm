@@ -17,7 +17,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.v1.engine import AgentHintResponse
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     DeltaMessage,
@@ -136,7 +135,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
         default=None, description="ECTransfer parameters."
     )
     metrics: PerRequestTimingMetrics | None = None
-    agent_hint_response : AgentHintResponse | None = None
+    agent_hint_response : dict[str, Any] | None = None
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -193,37 +192,6 @@ class ChatCompletionNamedFunction(OpenAIBaseModel):
 class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     function: ChatCompletionNamedFunction
     type: Literal["function"] = "function"
-
-
-class ContextManagementEditsParams(OpenAIBaseModel): # 上下文编辑
-    type: Literal["offload","prefetch","evict"] = "offload"
-    start: int = Field(default=0)
-    end: int = Field(default=0)
-    target: Literal["session", "messages", "tools"] = "messages"
-    block_start: int | None = Field(default=None, description="pymotor 转换的起始 block index")
-    block_end: int | None = Field(default=None, description="pymotor 转换的结束 block index")
-
-
-class ContextManagementParams(OpenAIBaseModel):
-    manage_request: bool | None = Field(default=False)
-    edits: list[ContextManagementEditsParams] = Field(default=None)
-
-
-class CacheControlParams(OpenAIBaseModel):
-    type: Literal["ephemeral"] = "ephemeral"
-    ttl: float = Field(default=300.0, ge=0, le=3600)
-    msg_offset: int | None = Field(
-        default=None,
-        description="pymotor侧为 message list 的 offset，处理成 block offset 传递到 vllm"
-    )
-    block_offset: int | None = Field(
-        default=None,
-        description="pymotor 处理添加的字段，表示 ephemeral 保护的起始 block index"
-    )
-    token_offset: int | None = Field(
-        default=None,
-        description="ephemeral 保护的起始 token offset"
-    )
 
 
 class ChatCompletionRequest(OpenAIBaseModel):

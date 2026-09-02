@@ -19,7 +19,6 @@ if TYPE_CHECKING:
         FreeKVCacheBlockQueue,
         KVCacheBlock,
     )
-    from vllm.v1.engine import AgentHintResponse
     from vllm.v1.request import Request
 
 
@@ -48,7 +47,7 @@ class AgentHintManager:
 
     def register_kvc_management_request(
         self, request: Request
-    ) -> AgentHintResponse | None:
+    ) -> dict | None:
         return None
 
     def on_request_added(self, request: Request) -> None:

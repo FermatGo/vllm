@@ -176,12 +176,6 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
-@dataclass
-class AgentHintResponse:
-    session_id: str | None
-    edit_results: list[Any] | None = None
-
-
 class EngineCoreOutput(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -211,7 +205,7 @@ class EngineCoreOutput(
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
 
-    agent_hint_response: AgentHintResponse | None = None
+    agent_hint_response: dict[str, Any] | None = None
 
     @property
     def finished(self) -> bool:
