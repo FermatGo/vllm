@@ -6,12 +6,11 @@ import copy
 import hashlib
 import math
 import os
-import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
+from typing import Any, NamedTuple, NewType, Protocol, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -115,42 +114,42 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
         NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
-@dataclass(slots=True)
-class AgentHintBlockField:
-    _session_ref_cnt: int = 0
-    _ttl_expire_at: float = 0.0
-    _is_offload_block: bool = False
+class AgentHintBlockField(Protocol):
+    """Agent Hint metadata implemented by hardware plugins."""
 
     @property
-    def session_ref_cnt(self) -> int:
-        return self._session_ref_cnt
+    def num_session_refs(self) -> int: ...
 
     @property
-    def ttl_expire_at(self) -> float:
-        return self._ttl_expire_at
+    def ttl_expire_at(self) -> float: ...
 
     @property
-    def is_offload_block(self) -> bool:
-        return self._is_offload_block
+    def is_ephemeral(self) -> bool: ...
 
-    def set(
+    @property
+    def is_offload_block(self) -> bool: ...
+
+    def set_session_state(
         self,
         *,
         session_ref_cnt: int | None = None,
         ttl_expire_at: float | None = None,
         is_offload_block: bool | None = None,
-    ) -> None:
-        if session_ref_cnt is not None:
-            self._session_ref_cnt = session_ref_cnt
-        if ttl_expire_at is not None:
-            self._ttl_expire_at = ttl_expire_at
-        if is_offload_block is not None:
-            self._is_offload_block = is_offload_block
+    ) -> None: ...
 
-    def reset(self) -> None:
-        self._session_ref_cnt = 0
-        self._ttl_expire_at = 0.0
-        self._is_offload_block = False
+    def reset_session_state(self) -> None: ...
+
+
+_AGENT_HINT_BLOCK_ATTRIBUTES = frozenset(
+    {
+        "num_session_refs",
+        "ttl_expire_at",
+        "is_ephemeral",
+        "is_offload_block",
+        "set_session_state",
+        "reset_session_state",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -176,9 +175,7 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
-    agent_hint_block_field: AgentHintBlockField = field(
-        default_factory=AgentHintBlockField
-    )
+    agent_hint_block_field: AgentHintBlockField | None = None
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
@@ -218,41 +215,16 @@ class KVCacheBlock:
             f"next_free_block={next_block_id})"
         )
 
-    @property
-    def num_session_refs(self) -> int:
-        return self.agent_hint_block_field.session_ref_cnt
+    def __getattr__(self, name: str) -> Any:
+        if name not in _AGENT_HINT_BLOCK_ATTRIBUTES:
+            raise AttributeError(f"{type(self).__name__} has no attribute {name!r}")
 
-    @property
-    def ttl_expire_at(self) -> float:
-        return self.agent_hint_block_field.ttl_expire_at
-
-    @property
-    def is_ephemeral(self) -> bool:
-        """Whether the block is protected by its ephemeral TTL."""
-        return self.ttl_expire_at > 0 and time.monotonic() < self.ttl_expire_at
-
-    @property
-    def is_offload_block(self) -> bool:
-        """Whether the block is retained for offload."""
-        return self.agent_hint_block_field.is_offload_block
-
-    def reset_session_state(self) -> None:
-        """Reset the session reference count and ephemeral state."""
-        self.agent_hint_block_field.reset()
-
-    def set_session_state(
-        self,
-        *,
-        session_ref_cnt: int | None = None,
-        ttl_expire_at: float | None = None,
-        is_offload_block: bool | None = None,
-    ) -> None:
-        """Update the provided Agent Hint block metadata fields."""
-        self.agent_hint_block_field.set(
-            session_ref_cnt=session_ref_cnt,
-            ttl_expire_at=ttl_expire_at,
-            is_offload_block=is_offload_block,
-        )
+        field = object.__getattribute__(self, "agent_hint_block_field")
+        if field is None:
+            raise AttributeError(
+                f"Agent Hint block metadata is not available: {name!r}"
+            )
+        return getattr(field, name)
 
 
 class KVCacheBlockCopy(NamedTuple):
@@ -504,7 +476,7 @@ class FreeKVCacheBlockQueue:
         while curr_block is not None and curr_block is not self.fake_free_list_tail:
             yield curr_block
             curr_block = curr_block.next_free_block
-    
+
     def on_block_meta_changed(self, block: KVCacheBlock) -> None:
         """Notify the queue after optional block metadata changes."""
         pass

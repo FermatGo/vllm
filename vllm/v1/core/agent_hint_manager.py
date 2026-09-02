@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     )
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import (
+        AgentHintBlockField,
         FreeKVCacheBlockQueue,
         KVCacheBlock,
     )
@@ -45,7 +46,9 @@ class AgentHintManager:
     def is_kvc_management_request(self, request: Request) -> bool:
         return False
 
-    def register_kvc_management_request(self, request: Request) -> AgentHintResponse | None:
+    def register_kvc_management_request(
+        self, request: Request
+    ) -> AgentHintResponse | None:
         return None
 
     def on_request_added(self, request: Request) -> None:
@@ -72,7 +75,11 @@ class AgentHintBackend(Protocol):
 
     def is_supported(self) -> bool: ...
 
-    def create_manager(self, context: AgentHintManagerContext) -> AgentHintManager: ...
+    def create_agent_hint_manager(
+        self, context: AgentHintManagerContext
+    ) -> AgentHintManager: ...
+
+    def create_kv_cache_block_field(self) -> AgentHintBlockField: ...
 
     def create_free_kv_cache_block_queue(
         self,
@@ -108,4 +115,4 @@ def create_agent_hint_manager(
     backend = get_agent_hint_backend()
     if backend is None:
         return AgentHintManager()
-    return backend.create_manager(context)
+    return backend.create_agent_hint_manager(context)

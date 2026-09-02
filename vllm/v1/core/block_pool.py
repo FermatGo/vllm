@@ -13,6 +13,7 @@ from vllm.distributed.kv_events import (
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
+    AgentHintBlockField,
     BlockHash,
     BlockHashWithGroupId,
     ExternalBlockHash,
@@ -173,7 +174,10 @@ class BlockPool:
         self.hash_block_size = hash_block_size
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
-            KVCacheBlock(idx) for idx in range(num_gpu_blocks)
+            KVCacheBlock(idx,
+                agent_hint_block_field=create_kv_cache_block_field(),
+            )
+            for idx in range(num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
@@ -826,6 +830,16 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+
+def create_kv_cache_block_field() -> AgentHintBlockField | None:
+    """Create block metadata from the active Agent Hint backend."""
+    from vllm.v1.core.agent_hint_manager import get_agent_hint_backend
+
+    backend = get_agent_hint_backend()
+    if backend is None:
+        return None
+    return backend.create_kv_cache_block_field()
 
 
 def create_free_kv_cache_block_queue(
