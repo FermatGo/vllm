@@ -1372,7 +1372,7 @@ class EngineCoreProc(EngineCore):
 
         raise SystemExit
 
-    def _is_agent_hint_session_management(
+    def _is_agent_hint_management_request(
         self,
         request_type: EngineCoreRequestType,
         request: Any,
@@ -1382,7 +1382,7 @@ class EngineCoreProc(EngineCore):
         req, request_wave = request
         return bool(req and self.scheduler.is_agent_hint_management_request(req))
 
-    def _process_agent_hint_session_management(
+    def _process_agent_hint_management_request(
         self,
         request_type: EngineCoreRequestType,
         request: Any,
@@ -1391,7 +1391,7 @@ class EngineCoreProc(EngineCore):
             return
         req, request_wave = request
         agent_hint_response = self.scheduler.register_agent_hint_management_request(req)
-        list = [
+        output_list = [
             EngineCoreOutput(
                 req.request_id,
                 [1],
@@ -1399,7 +1399,7 @@ class EngineCoreProc(EngineCore):
                 agent_hint_response=agent_hint_response,
             )
         ]
-        outputs = EngineCoreOutputs(engine_index=req.client_index, outputs=list)
+        outputs = EngineCoreOutputs(engine_index=req.client_index, outputs=output_list)
         self.output_queue.put_nowait((req.client_index, outputs))
 
     def _process_input_queue(self):
@@ -1419,8 +1419,8 @@ class EngineCoreProc(EngineCore):
             block = self.process_input_queue_block
             try:
                 req = self.input_queue.get(block=block)
-                if self._is_agent_hint_session_management(*req):
-                    self._process_agent_hint_session_management(*req)
+                if self._is_agent_hint_management_request(*req):
+                    self._process_agent_hint_management_request(*req)
                 else:
                     self._handle_client_request(*req)
             except queue.Empty:
@@ -1434,8 +1434,8 @@ class EngineCoreProc(EngineCore):
         # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
-            if self._is_agent_hint_session_management(*req):
-                self._process_agent_hint_session_management(*req)
+            if self._is_agent_hint_management_request(*req):
+                self._process_agent_hint_management_request(*req)
             else:
                 self._handle_client_request(*req)
 

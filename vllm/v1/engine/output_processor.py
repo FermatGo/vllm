@@ -37,10 +37,6 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
-
-from vllm.logger import init_logger
-logger = init_logger(__name__)
-
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
 
