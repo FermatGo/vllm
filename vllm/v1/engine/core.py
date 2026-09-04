@@ -592,7 +592,7 @@ class EngineCore:
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
-        if self.scheduler.has_requests() or self.scheduler.has_prefetch_req():
+        if (not self.scheduler.has_requests()) and (not self.scheduler.has_prefetch_req()):
             return {}, False
         if self.start_profiling:
             self.profiler.enable()
