@@ -14,11 +14,7 @@ if TYPE_CHECKING:
         KVConnectorBase_V1,
     )
     from vllm.v1.core.kv_cache_manager import KVCacheManager
-    from vllm.v1.core.kv_cache_utils import (
-        AgentHintBlockField,
-        FreeKVCacheBlockQueue,
-        KVCacheBlock,
-    )
+    from vllm.v1.core.kv_cache_utils import FreeKVCacheBlockQueue, KVCacheBlock
     from vllm.v1.request import Request
 
 
@@ -78,7 +74,7 @@ class AgentHintBackend(Protocol):
         self, context: AgentHintManagerContext
     ) -> AgentHintManager: ...
 
-    def create_kv_cache_block_field(self) -> AgentHintBlockField: ...
+    def create_kv_cache_block(self, block_id: int) -> KVCacheBlock: ...
 
     def create_free_kv_cache_block_queue(
         self,
