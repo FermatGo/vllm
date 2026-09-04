@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NamedTuple, NewType, Protocol, TypeAlias, cast, overload
+from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -114,44 +114,6 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
         NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
-class AgentHintBlockField(Protocol):
-    """Agent Hint metadata implemented by hardware plugins."""
-
-    @property
-    def num_session_refs(self) -> int: ...
-
-    @property
-    def ttl_expire_at(self) -> float: ...
-
-    @property
-    def is_ephemeral(self) -> bool: ...
-
-    @property
-    def is_offload_block(self) -> bool: ...
-
-    def set_session_state(
-        self,
-        *,
-        session_ref_cnt: int | None = None,
-        ttl_expire_at: float | None = None,
-        is_offload_block: bool | None = None,
-    ) -> None: ...
-
-    def reset_session_state(self) -> None: ...
-
-
-_AGENT_HINT_BLOCK_ATTRIBUTES = frozenset(
-    {
-        "num_session_refs",
-        "ttl_expire_at",
-        "is_ephemeral",
-        "is_offload_block",
-        "set_session_state",
-        "reset_session_state",
-    }
-)
-
-
 @dataclass(slots=True)
 class KVCacheBlock:
     """KV-cache block metadata."""
@@ -174,8 +136,6 @@ class KVCacheBlock:
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
-
-    agent_hint_block_field: AgentHintBlockField | None = None
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
@@ -214,18 +174,6 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
-
-    def __getattr__(self, name: str) -> Any:
-        if name not in _AGENT_HINT_BLOCK_ATTRIBUTES:
-            raise AttributeError(f"{type(self).__name__} has no attribute {name!r}")
-
-        field = object.__getattribute__(self, "agent_hint_block_field")
-        if field is None:
-            raise AttributeError(
-                f"Agent Hint block metadata is not available: {name!r}"
-            )
-        return getattr(field, name)
-
 
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
