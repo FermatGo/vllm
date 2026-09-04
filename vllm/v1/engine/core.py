@@ -86,6 +86,7 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
+import cProfile
 
 logger = init_logger(__name__)
 
@@ -238,6 +239,9 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+        self.profiler = cProfile.Profile()
+        self.profiling_count = 0
+        self.start_profiling = os.getenv("CORE_PROFILER_ENABLED", "0") == "1"
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -590,6 +594,8 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if self.scheduler.has_requests() or self.scheduler.has_prefetch_req():
             return {}, False
+        if self.start_profiling:
+            self.profiler.enable()
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
@@ -608,7 +614,11 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
-
+        if self.start_profiling:
+            self.profiler.disable()
+            self.profiling_count += 1
+            if self.profiling_count == 300:
+                self.profiler.dump_stats('run_profiling.prof')
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
@@ -647,6 +657,8 @@ class EngineCore:
 
         model_executed = False
         deferred_scheduler_output = None
+        if self.start_profiling:
+            self.profiler.enable()
         if self.scheduler.has_requests() or self.scheduler.has_prefetch_req():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
@@ -682,12 +694,22 @@ class EngineCore:
                 ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
+                    if self.start_profiling:
+                        self.profiler.disable()
+                        self.profiling_count += 1
+                        if self.profiling_count == 300:
+                            self.profiler.dump_stats('run_profiling.prof')
                     return None, model_executed
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
+            if self.start_profiling:
+                self.profiler.disable()
+                self.profiling_count += 1
+                if self.profiling_count == 300:
+                    self.profiler.dump_stats('run_profiling.prof')
             return None, False
 
         # Block until the next result is available.
@@ -733,7 +755,11 @@ class EngineCore:
             )
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
-
+        if self.start_profiling:
+            self.profiler.disable()
+            self.profiling_count += 1
+            if self.profiling_count == 300:
+                self.profiler.dump_stats('run_profiling.prof')
         return engine_core_outputs, model_executed
 
     def _process_aborts_queue(self):
