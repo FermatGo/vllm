@@ -383,7 +383,12 @@ class InputProcessor:
         elif isinstance(raw_agent_hint, Mapping):
             agent_hint = dict(raw_agent_hint)
         else:
-            agent_hint = dict(raw_agent_hint)
+            logger.warning(
+                "Ignoring invalid agent_hint: expected a mapping or pydantic "
+                "model, got %s. agent_hint will be treated as None.",
+                type(raw_agent_hint).__name__,
+            )
+            agent_hint = None
 
 
 

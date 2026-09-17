@@ -478,7 +478,7 @@ class EngineCore:
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
 
-        logger.info(
+        logger.debug(
             "add request, request_id=%s, num_prompt_tokens=%d",
             request.request_id,
             request.num_prompt_tokens,

@@ -1629,7 +1629,7 @@ class MambaManager(SingleTypeKVCacheManager):
         retention_interval: int | None = None,
     ) -> tuple[list[KVCacheBlock], int]:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        newly_cached_blocks, num_cached_blocks = super().cache_blocks(request, num_tokens)
+        newly_cached_blocks, num_cached_blocks = super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
